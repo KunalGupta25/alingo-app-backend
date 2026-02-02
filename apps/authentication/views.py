@@ -58,7 +58,7 @@ def send_otp(request):
 @api_view(['POST'])
 def verify_otp_endpoint(request):
     """
-    Verify OTP for phone number
+    Verify OTP for phone number and login/signup user
     Body: { "phone": "+1234567890", "otp": "123456" }
     """
     print(f"[VERIFY_OTP] Request received from {request.META.get('REMOTE_ADDR')}")
@@ -77,11 +77,20 @@ def verify_otp_endpoint(request):
         success, message = verify_otp(phone, otp_code)
         
         if success:
-            return Response({
-                'verified': True,
-                'message': message,
-                'phone': phone
-            }, status=status.HTTP_200_OK)
+            # Check if user exists
+            user = AuthService.get_user_by_phone(phone)
+            
+            if not user:
+                # Create new user (Signup)
+                print(f"Creating new user for phone: {phone}")
+                user = AuthService.create_user_by_phone(phone)
+            
+            # Generate JWT
+            from apps.verification.auth_middleware import generate_jwt
+            token = generate_jwt(user['user_id'], phone)
+            user['token'] = token
+            
+            return Response(user, status=status.HTTP_200_OK)
         else:
             return Response({
                 'verified': False,
@@ -89,6 +98,9 @@ def verify_otp_endpoint(request):
             }, status=status.HTTP_400_BAD_REQUEST)
             
     except Exception as e:
+        print(f"Verify OTP Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return Response(
             {'error': str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -127,6 +139,14 @@ def signup(request):
                 # Create user by phone
                 user = AuthService.create_user_by_phone(phone)
                 print(f"User created successfully: {user}")
+                
+                # Generate JWT token
+                from apps.verification.auth_middleware import generate_jwt
+                token = generate_jwt(user['user_id'], phone)
+                
+                # Add token to response
+                user['token'] = token
+                
                 return Response(user, status=status.HTTP_201_CREATED)
             else:
                 print(f"Invalid token format, parts length: {len(parts)}")
@@ -141,6 +161,12 @@ def signup(request):
                 firebase_uid=user_info['firebase_uid'],
                 phone=user_info['phone']
             )
+            
+            # Generate JWT token
+            from apps.verification.auth_middleware import generate_jwt
+            token = generate_jwt(user['user_id'], user_info['phone'])
+            user['token'] = token
+            
             return Response(user, status=status.HTTP_201_CREATED)
         
     except ValueError as e:
@@ -198,6 +224,11 @@ def login(request):
                         status=status.HTTP_404_NOT_FOUND
                     )
                 
+                # Generate JWT token
+                from apps.verification.auth_middleware import generate_jwt
+                token = generate_jwt(user['user_id'], phone)
+                user['token'] = token
+                
                 return Response(user, status=status.HTTP_200_OK)
             else:
                 return Response(
@@ -214,6 +245,11 @@ def login(request):
                     {'error': 'User not found. Please sign up first.'},
                     status=status.HTTP_404_NOT_FOUND
                 )
+            
+            # Generate JWT token
+            from apps.verification.auth_middleware import generate_jwt
+            token = generate_jwt(user['user_id'], user_info['phone'])
+            user['token'] = token
             
             return Response(user, status=status.HTTP_200_OK)
         
