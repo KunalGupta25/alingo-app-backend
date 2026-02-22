@@ -1,80 +1,90 @@
 """
 OTP Service for phone number verification
-Generates and verifies OTPs without external SMS provider (for development)
-In production, integrate with Twilio, AWS SNS, or similar
+Uses MongoDB for persistent OTP storage so OTPs survive server restarts.
+In production, integrate with Twilio, AWS SNS, or similar for SMS delivery.
 """
 import random
-import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from database.mongo import MongoDB
 
-# In-memory storage for OTPs (in production, use Redis)
-otp_storage = {}
+
+def _get_otp_collection():
+    return MongoDB.get_collection('otps')
+
 
 def generate_otp(phone_number):
     """
-    Generate a 6-digit OTP and store it with expiry
-    Returns: OTP code
+    Generate a 6-digit OTP, persist it in MongoDB, and return it.
     """
-    # Generate random 6-digit OTP
     otp = str(random.randint(100000, 999999))
-    
-    # Store OTP with 5-minute expiry
-    expiry_time = datetime.now() + timedelta(minutes=5)
-    otp_storage[phone_number] = {
-        'otp': otp,
-        'expiry': expiry_time,
-        'attempts': 0
-    }
-    
-    # Log OTP for development (in production, send via SMS)
-    print(f"📱 OTP for {phone_number}: {otp} (expires at {expiry_time.strftime('%H:%M:%S')})")
-    
+    expiry_time = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+    collection = _get_otp_collection()
+
+    # Upsert: replace any existing OTP for this phone
+    collection.replace_one(
+        {'phone': phone_number},
+        {
+            'phone': phone_number,
+            'otp': otp,
+            'expiry': expiry_time,
+            'attempts': 0,
+            'created_at': datetime.now(timezone.utc),
+        },
+        upsert=True,
+    )
+
+    # Log OTP for development (remove / replace with SMS in production)
+    print(f"📱 OTP for {phone_number}: {otp} (expires at {expiry_time.strftime('%H:%M:%S UTC')})")
+
     return otp
+
 
 def verify_otp(phone_number, otp_code):
     """
-    Verify OTP code for a phone number
+    Verify OTP code for a phone number.
     Returns: (success: bool, message: str)
     """
-    # Check if OTP exists for this phone number
-    if phone_number not in otp_storage:
+    collection = _get_otp_collection()
+    otp_data = collection.find_one({'phone': phone_number})
+
+    if not otp_data:
         return False, "No OTP found. Please request a new one."
-    
-    otp_data = otp_storage[phone_number]
-    
-    # Check if OTP has expired
-    if datetime.now() > otp_data['expiry']:
-        del otp_storage[phone_number]
+
+    # Check expiry
+    expiry = otp_data['expiry']
+    # Make expiry timezone-aware if stored naive
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+
+    if datetime.now(timezone.utc) > expiry:
+        collection.delete_one({'phone': phone_number})
         return False, "OTP has expired. Please request a new one."
-    
-    # Check attempt limit (max 3 attempts)
-    if otp_data['attempts'] >= 3:
-        del otp_storage[phone_number]
+
+    # Check attempt limit (max 3)
+    if otp_data.get('attempts', 0) >= 3:
+        collection.delete_one({'phone': phone_number})
         return False, "Too many incorrect attempts. Please request a new OTP."
-    
+
     # Verify OTP
     if str(otp_code) == str(otp_data['otp']):
-        # OTP is correct, remove from storage
-        del otp_storage[phone_number]
+        collection.delete_one({'phone': phone_number})
         return True, "OTP verified successfully"
     else:
-        # Increment attempt counter
-        otp_data['attempts'] += 1
-        return False, f"Invalid OTP. {3 - otp_data['attempts']} attempts remaining."
+        remaining = 3 - (otp_data.get('attempts', 0) + 1)
+        collection.update_one(
+            {'phone': phone_number},
+            {'$inc': {'attempts': 1}}
+        )
+        return False, f"Invalid OTP. {remaining} attempt(s) remaining."
+
 
 def cleanup_expired_otps():
     """
-    Remove expired OTPs from storage
-    Should be called periodically (in production, use task queue)
+    Remove expired OTPs from MongoDB.
+    Call this periodically (or use a MongoDB TTL index in production).
     """
-    current_time = datetime.now()
-    expired_phones = [
-        phone for phone, data in otp_storage.items()
-        if current_time > data['expiry']
-    ]
-    
-    for phone in expired_phones:
-        del otp_storage[phone]
-    
-    if expired_phones:
-        print(f"🗑️ Cleaned up {len(expired_phones)} expired OTPs")
+    collection = _get_otp_collection()
+    result = collection.delete_many({'expiry': {'$lt': datetime.now(timezone.utc)}})
+    if result.deleted_count:
+        print(f"🗑️ Cleaned up {result.deleted_count} expired OTP(s)")

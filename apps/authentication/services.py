@@ -67,7 +67,11 @@ class AuthService:
         user_doc = {
             'firebase_uid': firebase_uid,
             'phone': phone,
+            'full_name': '',
             'verification_status': 'UNVERIFIED',
+            'rating': 0.0,
+            'total_buddy_matches': 0,
+            'available_for_ride': False,
             'created_at': datetime.utcnow(),
             'updated_at': datetime.utcnow()
         }
@@ -135,7 +139,11 @@ class AuthService:
         user_doc = {
             'uid': uid,
             'phone': phone,
+            'full_name': '',
             'verification_status': 'UNVERIFIED',
+            'rating': 0.0,
+            'total_buddy_matches': 0,
+            'available_for_ride': False,
             'created_at': datetime.utcnow(),
             'updated_at': datetime.utcnow()
             # firebase_uid: not included for backend OTP users

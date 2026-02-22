@@ -59,8 +59,8 @@ def verify_jwt(token):
 
 def jwt_required(view_func):
     """
-    Decorator to require JWT authentication on views
-    
+    Decorator to require JWT authentication on views.
+
     Usage:
         @api_view(['GET'])
         @jwt_required
@@ -70,31 +70,86 @@ def jwt_required(view_func):
     """
     @wraps(view_func)
     def wrapper(request, *args, **kwargs):
-        # Extract JWT from Authorization header
         auth_header = request.headers.get('Authorization')
-        
+
         if not auth_header or not auth_header.startswith('Bearer '):
             return Response(
                 {'error': 'Authentication required'},
-                status=status.HTTP_401_UNAUTHORIZED
+                status=status.HTTP_401_UNAUTHORIZED,
             )
-        
-        # Get token
+
         token = auth_header.split(' ')[1]
-        
-        # Verify token
         payload = verify_jwt(token)
-        
+
         if not payload:
             return Response(
                 {'error': 'Invalid or expired token'},
-                status=status.HTTP_401_UNAUTHORIZED
+                status=status.HTTP_401_UNAUTHORIZED,
             )
-        
-        # Attach user info to request
+
         request.user_id = payload['user_id']
         request.user_phone = payload['phone']
-        
+
         return view_func(request, *args, **kwargs)
-    
+
+    return wrapper
+
+
+def verified_required(view_func):
+    """
+    Decorator to require both a valid JWT **and** VERIFIED status.
+
+    Returns 403 {"error": "User not verified"} for PENDING / UNVERIFIED users.
+
+    Usage:
+        @api_view(['GET'])
+        @verified_required
+        def my_view(request):
+            user_id = request.user_id
+            ...
+    """
+    @wraps(view_func)
+    def wrapper(request, *args, **kwargs):
+        # --- Step 1: validate JWT ---
+        auth_header = request.headers.get('Authorization')
+
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return Response(
+                {'error': 'Authentication required'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        token = auth_header.split(' ')[1]
+        payload = verify_jwt(token)
+
+        if not payload:
+            return Response(
+                {'error': 'Invalid or expired token'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        request.user_id = payload['user_id']
+        request.user_phone = payload['phone']
+
+        # --- Step 2: check verification status in DB ---
+        from database.mongo import get_users_collection
+        from bson import ObjectId
+
+        try:
+            users = get_users_collection()
+            user = users.find_one({'_id': ObjectId(payload['user_id'])}, {'verification_status': 1})
+        except Exception:
+            return Response(
+                {'error': 'Failed to validate user'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        if not user or user.get('verification_status') != 'VERIFIED':
+            return Response(
+                {'error': 'User not verified'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        return view_func(request, *args, **kwargs)
+
     return wrapper

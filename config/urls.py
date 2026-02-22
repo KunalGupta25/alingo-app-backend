@@ -10,6 +10,7 @@ urlpatterns = [
     path('', include('apps.core.urls')),
     path('auth/', include('apps.authentication.urls')),
     path('api/verification/', include('apps.verification.urls')),
+    path('users/', include('apps.users.urls')),
 ]
 
 # Serve media files in development

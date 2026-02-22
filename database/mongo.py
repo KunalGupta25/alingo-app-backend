@@ -36,6 +36,19 @@ class MongoDB:
         
         # firebase_uid NO LONGER has unique constraint
         # It's optional for backend OTP users
+
+        # TTL index on otps collection: MongoDB auto-deletes expired OTPs
+        try:
+            otps = cls._db.otps
+            otps.create_index('expiry', expireAfterSeconds=0)
+        except:
+            pass
+
+        # 2dsphere index on users.location for geo-based ride matching (Block 6)
+        try:
+            users.create_index([('location', '2dsphere')])
+        except:
+            pass
     
     @classmethod
     def get_db(cls):
