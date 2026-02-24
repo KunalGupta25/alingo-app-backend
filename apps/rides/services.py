@@ -154,7 +154,7 @@ class RideService:
                             'type':        'Point',
                             'coordinates': user_location,  # [lng, lat]
                         },
-                        '$maxDistance': 500,  # metres
+                        '$maxDistance': 2000,  # metres
                     }
                 },
             })
