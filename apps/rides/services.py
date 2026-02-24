@@ -212,6 +212,7 @@ class RideService:
 
             results.append({
                 'ride_id':          str(ride['_id']),
+                'creator_id':       str(ride['creator_id']),
                 'creator_name':     creator_name,
                 'creator_rating':   round(float(creator_rating), 1),
                 'distance_meters':  round(dist_m),
