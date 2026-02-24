@@ -175,3 +175,173 @@ def search_rides(request):
         print(f'[RIDE_SEARCH ERROR] {e}')
         import traceback; traceback.print_exc()
         return Response({'error': 'Search failed.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ─────────────────────────────────────────────────────────
+# BLOCK 7 — Request to Join
+# ─────────────────────────────────────────────────────────
+@api_view(['POST'])
+@verified_required
+def request_ride(request):
+    """
+    POST /rides/request
+    Body: { "ride_id": "<ObjectId>" }
+
+    Rules:
+    - Ride must be ACTIVE
+    - Caller cannot be the creator
+    - Caller not already a participant (any status)
+    - Approved seats < max_seats
+    Adds participant with status=PENDING.
+    """
+    try:
+        user_id = request.user_id
+        ride_id_str = request.data.get('ride_id')
+
+        if not ride_id_str:
+            return Response({'error': 'ride_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            ride_oid = ObjectId(ride_id_str)
+            user_oid = ObjectId(user_id)
+        except Exception:
+            return Response({'error': 'Invalid ride_id.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        rides = get_rides_collection()
+        ride  = rides.find_one({'_id': ride_oid})
+
+        if not ride:
+            return Response({'error': 'Ride not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Must be ACTIVE
+        if ride.get('status') != 'ACTIVE':
+            return Response({'error': 'This ride is no longer active.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Cannot request own ride
+        if ride['creator_id'] == user_oid:
+            return Response({'error': 'You cannot request to join your own ride.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        participants = ride.get('participants', [])
+
+        # Already a participant (any status)
+        already = next((p for p in participants if p.get('user_id') == user_oid), None)
+        if already:
+            existing_status = already.get('status', '')
+            if existing_status == 'PENDING':
+                return Response({'error': 'Your request is already pending.'}, status=status.HTTP_409_CONFLICT)
+            if existing_status == 'APPROVED':
+                return Response({'error': 'You are already in this ride.'}, status=status.HTTP_409_CONFLICT)
+            if existing_status == 'REJECTED':
+                return Response({'error': 'Your request was rejected by the creator.'}, status=status.HTTP_409_CONFLICT)
+
+        # Seat check — count only APPROVED participants
+        approved_count = sum(1 for p in participants if p.get('status') == 'APPROVED')
+        if approved_count >= ride.get('max_seats', 1):
+            return Response({'error': 'This ride is full.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Atomic push
+        rides.update_one(
+            {'_id': ride_oid},
+            {'$push': {'participants': {'user_id': user_oid, 'status': 'PENDING'}}},
+        )
+
+        print(f'[RIDE_REQUEST] User {user_id} → ride {ride_id_str}')
+        return Response({'message': 'Request sent'}, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        print(f'[RIDE_REQUEST ERROR] {e}')
+        import traceback; traceback.print_exc()
+        return Response({'error': 'Failed to send request.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ─────────────────────────────────────────────────────────
+# BLOCK 7 — Creator Responds (Approve / Reject)
+# ─────────────────────────────────────────────────────────
+@api_view(['POST'])
+@verified_required
+def respond_ride(request):
+    """
+    POST /rides/respond
+    Body: { "ride_id": "<ObjectId>", "user_id": "<ObjectId>", "action": "APPROVE"|"REJECT" }
+
+    Rules:
+    - Only the ride creator can call this
+    - Ride must be ACTIVE
+    - Target participant must exist
+    - APPROVE: re-check seat count (avoid race conditions)
+    - Uses positional $ operator for atomic participant update
+    """
+    try:
+        caller_id   = request.user_id
+        ride_id_str = request.data.get('ride_id')
+        target_id_str = request.data.get('user_id')
+        action      = request.data.get('action', '').upper()
+
+        if not ride_id_str or not target_id_str or not action:
+            return Response(
+                {'error': 'ride_id, user_id, and action are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if action not in ('APPROVE', 'REJECT'):
+            return Response({'error': 'action must be APPROVE or REJECT.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            ride_oid   = ObjectId(ride_id_str)
+            target_oid = ObjectId(target_id_str)
+            caller_oid = ObjectId(caller_id)
+        except Exception:
+            return Response({'error': 'Invalid ObjectId.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        rides = get_rides_collection()
+        ride  = rides.find_one({'_id': ride_oid})
+
+        if not ride:
+            return Response({'error': 'Ride not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Only creator
+        if ride['creator_id'] != caller_oid:
+            return Response({'error': 'Only the ride creator can respond to requests.'}, status=status.HTTP_403_FORBIDDEN)
+
+        # Must be ACTIVE
+        if ride.get('status') != 'ACTIVE':
+            return Response({'error': 'Cannot respond after the ride is completed or cancelled.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        participants = ride.get('participants', [])
+
+        # Find target participant
+        target = next((p for p in participants if p.get('user_id') == target_oid), None)
+        if not target:
+            return Response({'error': 'User has not requested to join this ride.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if target.get('status') != 'PENDING':
+            return Response(
+                {'error': f'Request is already {target["status"].lower()}.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        if action == 'APPROVE':
+            # Re-check seats (prevent race conditions)
+            approved_count = sum(1 for p in participants if p.get('status') == 'APPROVED')
+            if approved_count >= ride.get('max_seats', 1):
+                return Response({'error': 'Ride is full. Cannot approve more riders.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        new_status = 'APPROVED' if action == 'APPROVE' else 'REJECTED'
+
+        # Atomic positional update
+        result = rides.update_one(
+            {'_id': ride_oid, 'participants.user_id': target_oid},
+            {'$set': {'participants.$.status': new_status}},
+        )
+
+        if result.modified_count == 0:
+            return Response({'error': 'Update failed. Please try again.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        msg = 'User approved' if action == 'APPROVE' else 'User rejected'
+        print(f'[RIDE_RESPOND] Creator {caller_id} → {action} user {target_id_str} on ride {ride_id_str}')
+        return Response({'message': msg}, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        print(f'[RIDE_RESPOND ERROR] {e}')
+        import traceback; traceback.print_exc()
+        return Response({'error': 'Failed to respond.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
