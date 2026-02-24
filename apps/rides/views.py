@@ -10,7 +10,7 @@ from datetime import date, datetime
 from bson import ObjectId
 
 from apps.verification.auth_middleware import verified_required
-from database.mongo import get_users_collection
+from database.mongo import get_users_collection, get_rides_collection
 from .services import RideService
 
 
