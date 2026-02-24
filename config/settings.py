@@ -28,6 +28,7 @@ INSTALLED_APPS = [
     'apps.authentication',
     'apps.verification',
     'apps.users',
+    'apps.rides',
 ]
 
 MIDDLEWARE = [

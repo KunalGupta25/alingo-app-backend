@@ -49,14 +49,33 @@ class MongoDB:
             users.create_index([('location', '2dsphere')])
         except:
             pass
-    
+
+        # ── Rides collection indexes (Block 5) ──────────────────
+        rides = cls._db.rides
+        try:
+            rides.create_index([('start_location', '2dsphere')])
+        except:
+            pass
+        try:
+            rides.create_index('creator_id')
+        except:
+            pass
+        try:
+            rides.create_index('status')
+        except:
+            pass
+        try:
+            rides.create_index('ride_date')
+        except:
+            pass
+
     @classmethod
     def get_db(cls):
         """Get the database instance"""
         if cls._db is None:
             cls()
         return cls._db
-    
+
     @classmethod
     def get_collection(cls, collection_name):
         """Get a specific collection"""
@@ -67,3 +86,7 @@ class MongoDB:
 # Convenience functions
 def get_users_collection():
     return MongoDB.get_collection('users')
+
+def get_rides_collection():
+    return MongoDB.get_collection('rides')
+
