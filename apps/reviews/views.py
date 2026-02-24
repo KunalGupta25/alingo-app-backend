@@ -10,7 +10,7 @@ from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
 
 from database.mongo import get_reviews_collection, get_rides_collection, get_users_collection
-from apps.verification.auth import verified_required
+from apps.verification.auth_middleware import verified_required
 
 
 # ─────────────────────────────────────────────────────────
