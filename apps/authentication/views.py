@@ -1,6 +1,7 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
+from database.mongo import get_users_collection
 from .services import AuthService
 from .otp_service import generate_otp, verify_otp
 
@@ -20,7 +21,8 @@ def send_otp(request):
     print(f"[SEND_OTP] Request received from {request.META.get('REMOTE_ADDR')}")
     try:
         phone = request.data.get('phone')
-        print(f"[SEND_OTP] Phone: {phone}")
+        auth_type = request.data.get('type')  # 'login' or 'signup'
+        print(f"[SEND_OTP] Phone: {phone}, Type: {auth_type}")
         
         if not phone:
             return Response(
@@ -33,6 +35,22 @@ def send_otp(request):
             return Response(
                 {'error': 'Invalid phone number format. Use international format: +1234567890'},
                 status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check user existence based on flow type
+        users = get_users_collection()
+        user_exists = users.find_one({'phone': phone}) is not None
+        
+        if auth_type == 'login' and not user_exists:
+            return Response(
+                {'error': 'No account found with this phone number. Please sign up first.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+            
+        if auth_type == 'signup' and user_exists:
+            return Response(
+                {'error': 'An account with this phone number already exists. Please log in.'},
+                status=status.HTTP_409_CONFLICT
             )
         
         # Generate and send OTP
