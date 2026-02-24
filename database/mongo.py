@@ -69,6 +69,21 @@ class MongoDB:
         except:
             pass
 
+        # ── Reviews collection indexes (Block 8) ────────────────
+        reviews = cls._db.reviews
+        try:
+            # Prevent duplicate reviews for same ride+reviewer+reviewee
+            reviews.create_index(
+                [('ride_id', 1), ('reviewer_id', 1), ('reviewee_id', 1)],
+                unique=True,
+            )
+        except:
+            pass
+        try:
+            reviews.create_index('reviewee_id')   # fast aggregation for rating
+        except:
+            pass
+
     @classmethod
     def get_db(cls):
         """Get the database instance"""
@@ -89,4 +104,7 @@ def get_users_collection():
 
 def get_rides_collection():
     return MongoDB.get_collection('rides')
+
+def get_reviews_collection():
+    return MongoDB.get_collection('reviews')
 

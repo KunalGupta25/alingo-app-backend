@@ -29,6 +29,7 @@ INSTALLED_APPS = [
     'apps.verification',
     'apps.users',
     'apps.rides',
+    'apps.reviews',
 ]
 
 MIDDLEWARE = [

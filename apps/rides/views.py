@@ -345,3 +345,157 @@ def respond_ride(request):
         print(f'[RIDE_RESPOND ERROR] {e}')
         import traceback; traceback.print_exc()
         return Response({'error': 'Failed to respond.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ─────────────────────────────────────────────────────────
+# BLOCK 8 — Complete Ride (Majority Vote)
+# ─────────────────────────────────────────────────────────
+@api_view(['POST'])
+@verified_required
+def complete_ride(request):
+    """
+    POST /rides/complete
+    Body: { "ride_id": "<ObjectId>" }
+
+    Majority vote logic:
+    - eligible = creator + all APPROVED participants
+    - majority_needed = floor(len(eligible) / 2) + 1
+    - Adds caller to completion_votes ($addToSet, idempotent)
+    - If votes >= majority_needed → COMPLETED + timestamp
+    - On completion: increments total_buddy_matches for all eligible users
+    """
+    try:
+        caller_id   = request.user_id
+        ride_id_str = request.data.get('ride_id')
+
+        if not ride_id_str:
+            return Response({'error': 'ride_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            ride_oid   = ObjectId(ride_id_str)
+            caller_oid = ObjectId(caller_id)
+        except Exception:
+            return Response({'error': 'Invalid ride_id.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        rides = get_rides_collection()
+        ride  = rides.find_one({'_id': ride_oid})
+
+        if not ride:
+            return Response({'error': 'Ride not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if ride.get('status') != 'ACTIVE':
+            return Response({'error': 'Ride is not active.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Build eligible set: creator + APPROVED participants
+        participants = ride.get('participants', [])
+        approved_ids = [p['user_id'] for p in participants if p.get('status') == 'APPROVED']
+        creator_oid  = ride['creator_id']
+        eligible     = list({creator_oid} | set(approved_ids))   # deduplicated
+
+        if caller_oid not in eligible:
+            return Response(
+                {'error': 'Only the creator or approved participants can complete a ride.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Atomic: add vote (idempotent — $addToSet ignores duplicates)
+        rides.update_one(
+            {'_id': ride_oid},
+            {'$addToSet': {'completion_votes': caller_oid}},
+        )
+
+        # Re-fetch to get updated vote count
+        ride         = rides.find_one({'_id': ride_oid})
+        current_votes = ride.get('completion_votes', [])
+        majority_needed = (len(eligible) // 2) + 1
+
+        print(f'[COMPLETE] ride={ride_id_str} votes={len(current_votes)}/{majority_needed}')
+
+        if len(current_votes) >= majority_needed:
+            # Mark ride as COMPLETED
+            rides.update_one(
+                {'_id': ride_oid},
+                {'$set': {'status': 'COMPLETED', 'completed_at': datetime.utcnow()}},
+            )
+
+            # Increment total_buddy_matches for all eligible users
+            users = get_users_collection()
+            users.update_many(
+                {'_id': {'$in': eligible}},
+                {'$inc': {'total_buddy_matches': 1}},
+            )
+
+            print(f'[COMPLETE] Ride {ride_id_str} COMPLETED — {len(eligible)} buddies matched')
+            return Response({'message': 'Ride completed', 'status': 'COMPLETED'}, status=status.HTTP_200_OK)
+
+        # Vote recorded but not yet majority
+        return Response(
+            {
+                'message': 'Vote recorded',
+                'votes': len(current_votes),
+                'needed': majority_needed,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    except Exception as e:
+        print(f'[RIDE_COMPLETE ERROR] {e}')
+        import traceback; traceback.print_exc()
+        return Response({'error': 'Failed to complete ride.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ─────────────────────────────────────────────────────────
+# BLOCK 8 — My Active Ride (used by home screen)
+# ─────────────────────────────────────────────────────────
+@api_view(['GET'])
+@verified_required
+def my_active_ride(request):
+    """
+    GET /rides/my-active
+
+    Returns the caller's own ACTIVE ride (if any) with:
+    - ride_id, ride_time, destination_name, max_seats
+    - participants list: [{user_id, name, status}]
+    Used by the home screen to show the "Complete Ride" button.
+    """
+    try:
+        caller_id  = request.user_id
+        caller_oid = ObjectId(caller_id)
+
+        rides = get_rides_collection()
+        ride  = rides.find_one({'creator_id': caller_oid, 'status': 'ACTIVE'})
+
+        if not ride:
+            return Response({'ride': None}, status=status.HTTP_200_OK)
+
+        # Enrich participants with names
+        users      = get_users_collection()
+        enriched   = []
+        for p in ride.get('participants', []):
+            uid   = p.get('user_id')
+            pstat = p.get('status', '')
+            user  = users.find_one({'_id': uid}, {'full_name': 1, 'phone': 1})
+            name  = (user or {}).get('full_name') or (user or {}).get('phone', 'Unknown')
+            enriched.append({'user_id': str(uid), 'name': name, 'status': pstat})
+
+        votes_count = len(ride.get('completion_votes', []))
+        approved_count = sum(1 for p in enriched if p['status'] == 'APPROVED')
+        total_eligible = approved_count + 1  # +1 for creator
+        majority_needed = (total_eligible // 2) + 1
+
+        return Response({
+            'ride': {
+                'ride_id':          str(ride['_id']),
+                'ride_time':        ride.get('ride_time', ''),
+                'destination_name': ride.get('destination', {}).get('name', ''),
+                'max_seats':        ride.get('max_seats', 1),
+                'participants':     enriched,
+                'completion_votes': votes_count,
+                'majority_needed':  majority_needed,
+            }
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        print(f'[MY_ACTIVE ERROR] {e}')
+        import traceback; traceback.print_exc()
+        return Response({'error': 'Failed to fetch active ride.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
