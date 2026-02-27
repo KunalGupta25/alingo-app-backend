@@ -454,16 +454,33 @@ def my_active_ride(request):
     GET /rides/my-active
 
     Returns the caller's own ACTIVE ride (if any) with:
-    - ride_id, ride_time, destination_name, max_seats
+    - ride_id, ride_time, destination_name, max_seats, is_creator
     - participants list: [{user_id, name, status}]
-    Used by the home screen to show the "Complete Ride" button.
+    Returns either a ride the caller CREATED or one they have JOINED (APPROVED).
+    Used by the home screen to show the "Complete Ride" panel.
     """
     try:
         caller_id  = request.user_id
         caller_oid = ObjectId(caller_id)
 
         rides = get_rides_collection()
-        ride  = rides.find_one({'creator_id': caller_oid, 'status': 'ACTIVE'})
+
+        # 1. Ride the caller created
+        ride = rides.find_one({'creator_id': caller_oid, 'status': 'ACTIVE'})
+        is_creator = True
+
+        # 2. Fallback: a ride where the caller is an APPROVED participant
+        if not ride:
+            ride = rides.find_one({
+                'status': 'ACTIVE',
+                'participants': {
+                    '$elemMatch': {
+                        'user_id': caller_oid,
+                        'status': 'APPROVED',
+                    }
+                }
+            })
+            is_creator = False
 
         if not ride:
             return Response({'ride': None}, status=status.HTTP_200_OK)
@@ -492,6 +509,8 @@ def my_active_ride(request):
                 'participants':     enriched,
                 'completion_votes': votes_count,
                 'majority_needed':  majority_needed,
+                'is_creator':       is_creator,
+                'creator_id':       str(ride['creator_id']),
             }
         }, status=status.HTTP_200_OK)
 
@@ -499,3 +518,64 @@ def my_active_ride(request):
         print(f'[MY_ACTIVE ERROR] {e}')
         import traceback; traceback.print_exc()
         return Response({'error': 'Failed to fetch active ride.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ─────────────────────────────────────────────────────────
+# BLOCK 9 — My Ride Requests (for participants)
+# ─────────────────────────────────────────────────────────
+@api_view(['GET'])
+@verified_required
+def my_requests(request):
+    """
+    GET /rides/my-requests
+
+    Returns all ACTIVE rides the caller has a PENDING or APPROVED participant
+    entry in (excluding rides they created). Used by riders to check their
+    join request status.
+    """
+    try:
+        caller_id  = request.user_id
+        caller_oid = ObjectId(caller_id)
+
+        rides = get_rides_collection()
+        users = get_users_collection()
+
+        cursor = rides.find({
+            'status': 'ACTIVE',
+            'creator_id': {'$ne': caller_oid},
+            'participants': {
+                '$elemMatch': {
+                    'user_id': caller_oid,
+                    'status': {'$in': ['PENDING', 'APPROVED', 'REJECTED']},
+                }
+            }
+        })
+
+        result = []
+        for ride in cursor:
+            # Find this caller's participant entry
+            my_entry = next(
+                (p for p in ride.get('participants', []) if p.get('user_id') == caller_oid),
+                None,
+            )
+            if not my_entry:
+                continue
+
+            creator = users.find_one({'_id': ride['creator_id']}, {'full_name': 1, 'phone': 1})
+            creator_name = (creator or {}).get('full_name') or (creator or {}).get('phone', 'Unknown')
+
+            result.append({
+                'ride_id':          str(ride['_id']),
+                'ride_time':        ride.get('ride_time', ''),
+                'destination_name': ride.get('destination', {}).get('name', ''),
+                'creator_name':     creator_name,
+                'creator_id':       str(ride['creator_id']),
+                'my_status':        my_entry.get('status', ''),
+            })
+
+        return Response({'requests': result}, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        print(f'[MY_REQUESTS ERROR] {e}')
+        import traceback; traceback.print_exc()
+        return Response({'error': 'Failed to fetch ride requests.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
