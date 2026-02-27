@@ -112,12 +112,13 @@ class AuthService:
         }
     
     @staticmethod
-    def create_user_by_phone(phone):
+    def create_user_by_phone(phone, profile_data=None):
         """
         Create a new user by phone number (for backend OTP flow)
         
         Args:
             phone: Phone number
+            profile_data: Optional dict with full_name, age, gender, bio
             
         Returns:
             dict: Created user document
@@ -126,6 +127,7 @@ class AuthService:
             ValueError: If user already exists
         """
         users = get_users_collection()
+        profile_data = profile_data or {}
         
         # Check if user already exists
         existing_user = users.find_one({'phone': phone})
@@ -139,14 +141,19 @@ class AuthService:
         user_doc = {
             'uid': uid,
             'phone': phone,
-            'full_name': '',
-            'verification_status': 'UNVERIFIED',
+            'firebase_uid': None, # explicitly None for phone auth
+            'created_at': datetime.utcnow(),
+            'updated_at': datetime.utcnow(),
+            'role': 'user',
             'rating': 0.0,
             'total_buddy_matches': 0,
-            'available_for_ride': False,
-            'created_at': datetime.utcnow(),
-            'updated_at': datetime.utcnow()
-            # firebase_uid: not included for backend OTP users
+            'verification_status': 'PENDING',
+            'rides_completed': 0,
+            'reviews_count': 0,
+            'full_name': profile_data.get('full_name', ''),
+            'age': profile_data.get('age', ''),
+            'gender': profile_data.get('gender', ''),
+            'bio': profile_data.get('bio', '')
         }
         
         result = users.insert_one(user_doc)

@@ -101,7 +101,13 @@ def verify_otp_endpoint(request):
             if not user:
                 # Create new user (Signup)
                 print(f"Creating new user for phone: {phone}")
-                user = AuthService.create_user_by_phone(phone)
+                profile_data = {
+                    'full_name': request.data.get('fullName', ''),
+                    'age': request.data.get('age', ''),
+                    'gender': request.data.get('gender', ''),
+                    'bio': request.data.get('bio', '')
+                }
+                user = AuthService.create_user_by_phone(phone, profile_data=profile_data)
             
             # Generate JWT
             from apps.verification.auth_middleware import generate_jwt
