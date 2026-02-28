@@ -445,6 +445,55 @@ def complete_ride(request):
 
 
 # ─────────────────────────────────────────────────────────
+# BLOCK X — Cancel Ride
+# ─────────────────────────────────────────────────────────
+@api_view(['POST'])
+@verified_required
+def cancel_ride(request):
+    """
+    POST /rides/cancel
+    Body: { "ride_id": "<ObjectId>" }
+    
+    Rules:
+    - Only creator can cancel.
+    - Status changing to CANCELED.
+    """
+    try:
+        user_id = request.user_id
+        ride_id_str = request.data.get('ride_id')
+        
+        if not ride_id_str:
+            return Response({'error': 'ride_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        try:
+            ride_oid = ObjectId(ride_id_str)
+            user_oid = ObjectId(user_id)
+        except Exception:
+            return Response({'error': 'Invalid ride_id.'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        rides = get_rides_collection()
+        ride = rides.find_one({'_id': ride_oid})
+        
+        if not ride:
+            return Response({'error': 'Ride not found.'}, status=status.HTTP_404_NOT_FOUND)
+            
+        if ride.get('creator_id') != user_oid:
+            return Response({'error': 'Only the creator can cancel this ride.'}, status=status.HTTP_403_FORBIDDEN)
+            
+        if ride.get('status') != 'ACTIVE':
+            return Response({'error': 'Only active rides can be canceled.'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        rides.update_one({'_id': ride_oid}, {'$set': {'status': 'CANCELED'}})
+        
+        return Response({'message': 'Ride canceled successfully.'}, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        print(f'[RIDE_CANCEL ERROR] {e}')
+        import traceback; traceback.print_exc()
+        return Response({'error': 'Failed to cancel the ride.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ─────────────────────────────────────────────────────────
 # BLOCK 8 — My Active Ride (used by home screen)
 # ─────────────────────────────────────────────────────────
 @api_view(['GET'])
