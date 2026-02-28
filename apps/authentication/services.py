@@ -147,7 +147,7 @@ class AuthService:
             'role': 'user',
             'rating': 0.0,
             'total_buddy_matches': 0,
-            'verification_status': 'PENDING',
+            'verification_status': 'UNVERIFIED',
             'rides_completed': 0,
             'reviews_count': 0,
             'full_name': profile_data.get('full_name', ''),

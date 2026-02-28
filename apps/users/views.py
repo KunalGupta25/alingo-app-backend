@@ -45,6 +45,8 @@ def get_me(request):
             'verification_status': user.get('verification_status', 'PENDING'),
             'rides_completed':     rides_completed,
             'reviews_count':       reviews_count,
+            'gender':              user.get('gender', ''),
+            'age':                 user.get('age', ''),
         }, status=status.HTTP_200_OK)
 
     except Exception as e:
