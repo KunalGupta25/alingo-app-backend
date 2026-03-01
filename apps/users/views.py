@@ -184,6 +184,7 @@ def my_ride_history(request):
 
         created_cursor = rides.find({'creator_id': uid}).sort('created_at', -1).limit(20)
         joined_cursor  = rides.find({
+            'creator_id': {'$ne': uid},
             'participants': {'$elemMatch': {'user_id': uid, 'status': 'APPROVED'}}
         }).sort('created_at', -1).limit(20)
 

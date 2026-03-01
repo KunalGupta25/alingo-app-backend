@@ -10,4 +10,5 @@ urlpatterns = [
     path('my-active',   views.my_active_ride, name='my_active_ride'),
     path('my-requests', views.my_requests,    name='my_requests'),
     path('cancel',      views.cancel_ride,    name='cancel_ride'),
+    path('detail',       views.ride_detail,    name='ride_detail'),
 ]

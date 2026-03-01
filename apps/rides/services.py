@@ -102,16 +102,18 @@ class RideService:
         ride_time: str,
         max_seats: int,
         route_polyline: str,
+        gender_preference: str = 'Any',
     ) -> dict:
         rides = get_rides_collection()
         ride_doc = {
-            'creator_id':     ObjectId(creator_id),
-            'start_location': start_location,
-            'destination':    destination,
-            'route_polyline': route_polyline,
-            'ride_date':      ride_date,
-            'ride_time':      ride_time,
-            'max_seats':      max_seats,
+            'creator_id':        ObjectId(creator_id),
+            'start_location':    start_location,
+            'destination':       destination,
+            'route_polyline':    route_polyline,
+            'gender_preference': gender_preference,
+            'ride_date':         ride_date,
+            'ride_time':         ride_time,
+            'max_seats':         max_seats,
             'participants': [{
                 'user_id': ObjectId(creator_id),
                 'status':  'APPROVED',
@@ -131,6 +133,7 @@ class RideService:
         ride_date:      str,             # 'YYYY-MM-DD'
         user_polyline:  str = '',
         min_overlap_pct: float = 50.0,
+        gender_filter:  str = 'All',     # Searching filter (All, Male, Female)
     ) -> list[dict]:
         """
         5-step matching pipeline.
@@ -142,6 +145,10 @@ class RideService:
         users_col  = get_users_collection()
         user_oid   = ObjectId(user_id)
         user_coords = decode_polyline(user_polyline)
+
+        # Get searching user's gender
+        searching_user = users_col.find_one({'_id': user_oid})
+        searching_gender = (searching_user or {}).get('gender', 'Unknown')
 
         # ── STEP 1 + 2  Filter by date & 500m geo radius ──
         try:
@@ -209,12 +216,25 @@ class RideService:
             creator = users_col.find_one({'_id': ride['creator_id']})
             creator_name   = (creator or {}).get('full_name') or (creator or {}).get('phone', 'Unknown')
             creator_rating = (creator or {}).get('rating', 0.0)
+            creator_gender = (creator or {}).get('gender', 'Unknown')
+
+            # ── Check Gender Compatibilities ─────────────
+            ride_pref = ride.get('gender_preference', 'Any')
+            
+            # 1. Does the CREATOR mandate a specific gender?
+            if ride_pref != 'Any' and ride_pref != searching_gender:
+                continue
+                
+            # 2. Does the SEARCHER mandate a specific gender?
+            if gender_filter != 'All' and gender_filter != creator_gender:
+                continue
 
             results.append({
                 'ride_id':          str(ride['_id']),
                 'creator_id':       str(ride['creator_id']),
                 'creator_name':     creator_name,
                 'creator_rating':   round(float(creator_rating), 1),
+                'creator_gender':   creator_gender,
                 'distance_meters':  round(dist_m),
                 'available_seats':  max_seats - approved_count,
                 'ride_time':        ride.get('ride_time', ''),

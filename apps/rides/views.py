@@ -56,9 +56,10 @@ def create_ride(request):
 
         destination    = request.data.get('destination')
         ride_date_str  = request.data.get('ride_date')
-        ride_time      = request.data.get('ride_time')
-        max_seats      = request.data.get('max_seats')
-        route_polyline = request.data.get('route_polyline', '')
+        ride_time         = request.data.get('ride_time')
+        max_seats         = request.data.get('max_seats')
+        route_polyline    = request.data.get('route_polyline', '')
+        gender_preference = request.data.get('gender_preference', 'Any')
 
         if not destination or not ride_date_str or not ride_time or max_seats is None:
             return Response(
@@ -96,9 +97,10 @@ def create_ride(request):
             ride_time=ride_time,
             max_seats=max_seats,
             route_polyline=route_polyline,
+            gender_preference=gender_preference,
         )
 
-        print(f'[RIDE_CREATE] User {user_id} → {destination["name"]} on {ride_date_str}')
+        print(f'[RIDE_CREATE] User {user_id} → {destination["name"]} on {ride_date_str} (Prefer: {gender_preference})')
         return Response({
             'ride_id':     str(ride['_id']),
             'status':      ride['status'],
@@ -139,6 +141,7 @@ def search_rides(request):
         user_location  = request.data.get('user_location')
         ride_date_str  = request.data.get('ride_date')
         route_polyline = request.data.get('route_polyline', '')
+        gender_filter  = request.data.get('gender_filter', 'All')
 
         # ── Validate ─────────────────────────────────────
         if not user_location or not ride_date_str:
@@ -542,7 +545,8 @@ def my_active_ride(request):
             pstat = p.get('status', '')
             user  = users.find_one({'_id': uid}, {'full_name': 1, 'phone': 1})
             name  = (user or {}).get('full_name') or (user or {}).get('phone', 'Unknown')
-            enriched.append({'user_id': str(uid), 'name': name, 'status': pstat})
+            phone = (user or {}).get('phone', '')
+            enriched.append({'user_id': str(uid), 'name': name, 'phone': phone, 'status': pstat})
 
         votes_count = len(ride.get('completion_votes', []))
         approved_count = sum(1 for p in enriched if p['status'] == 'APPROVED')
@@ -560,6 +564,7 @@ def my_active_ride(request):
                 'majority_needed':  majority_needed,
                 'is_creator':       is_creator,
                 'creator_id':       str(ride['creator_id']),
+                'route_polyline':   ride.get('route_polyline', ''),
             }
         }, status=status.HTTP_200_OK)
 
@@ -628,3 +633,68 @@ def my_requests(request):
         print(f'[MY_REQUESTS ERROR] {e}')
         import traceback; traceback.print_exc()
         return Response({'error': 'Failed to fetch ride requests.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ─────────────────────────────────────────────────────────
+# BLOCK 10 — Ride Detail
+# ─────────────────────────────────────────────────────────
+@api_view(['GET'])
+@verified_required
+def ride_detail(request):
+    """
+    GET /rides/detail?ride_id=<ride_id>
+
+    Returns full details about a specific ride:
+    - ride_id, status, destination, ride_date, ride_time, max_seats
+    - route_polyline
+    - participants list with names and phones
+    - creator info
+    """
+    try:
+        ride_id = request.query_params.get('ride_id')
+        if not ride_id:
+            return Response({'error': 'ride_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        rides = get_rides_collection()
+        users = get_users_collection()
+
+        ride = rides.find_one({'_id': ObjectId(ride_id)})
+        if not ride:
+            return Response({'error': 'Ride not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Enrich participants with names
+        enriched = []
+        for p in ride.get('participants', []):
+            uid = p.get('user_id')
+            pstat = p.get('status', '')
+            user = users.find_one({'_id': uid}, {'full_name': 1, 'phone': 1})
+            name = (user or {}).get('full_name') or (user or {}).get('phone', 'Unknown')
+            phone = (user or {}).get('phone', '')
+            enriched.append({'user_id': str(uid), 'name': name, 'phone': phone, 'status': pstat})
+
+        # Creator info
+        creator = users.find_one({'_id': ride['creator_id']}, {'full_name': 1, 'phone': 1})
+        creator_name = (creator or {}).get('full_name') or (creator or {}).get('phone', 'Unknown')
+
+        dest = ride.get('destination', {})
+
+        return Response({
+            'ride_id':          str(ride['_id']),
+            'status':           ride.get('status', ''),
+            'destination_name': dest.get('name', ''),
+            'destination_coords': dest.get('coordinates', []),
+            'ride_date':        ride.get('ride_date', ''),
+            'ride_time':        ride.get('ride_time', ''),
+            'max_seats':        ride.get('max_seats', 1),
+            'route_polyline':   ride.get('route_polyline', ''),
+            'creator_id':       str(ride['creator_id']),
+            'creator_name':     creator_name,
+            'participants':     enriched,
+            'gender_preference': ride.get('gender_preference', 'Any'),
+            'created_at':       str(ride.get('created_at', '')),
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        print(f'[RIDE_DETAIL ERROR] {e}')
+        import traceback; traceback.print_exc()
+        return Response({'error': 'Failed to fetch ride details.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
