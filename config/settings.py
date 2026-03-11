@@ -1,4 +1,6 @@
 import os
+import json
+import tempfile
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -35,6 +37,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -87,6 +90,8 @@ USE_TZ = True
 
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = 'static/'
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 # Media Files Configuration
 MEDIA_URL = '/media/'
@@ -122,7 +127,17 @@ MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
 MONGODB_DB_NAME = os.getenv('MONGODB_DB_NAME', 'alingo_db')
 
 # Firebase settings
-FIREBASE_CREDENTIALS_PATH = os.getenv(
-    'FIREBASE_CREDENTIALS_PATH',
-    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'firebase_service_account_key.json')
-)
+# Railway: pass the entire service account JSON as FIREBASE_CREDENTIALS_JSON env var
+# Local: use FIREBASE_CREDENTIALS_PATH pointing to the JSON file
+_firebase_json = os.getenv('FIREBASE_CREDENTIALS_JSON')
+if _firebase_json:
+    # Write the JSON to a temp file so firebase_admin can read it
+    _tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
+    _tmp.write(_firebase_json)
+    _tmp.close()
+    FIREBASE_CREDENTIALS_PATH = _tmp.name
+else:
+    FIREBASE_CREDENTIALS_PATH = os.getenv(
+        'FIREBASE_CREDENTIALS_PATH',
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'firebase_service_account_key.json')
+    )
