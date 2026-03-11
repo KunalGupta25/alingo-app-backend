@@ -3,7 +3,6 @@ from rest_framework.response import Response
 from rest_framework import status
 from database.mongo import get_users_collection
 from .services import AuthService
-from .otp_service import generate_otp, verify_otp
 
 
 @api_view(['GET'])
@@ -12,133 +11,12 @@ def ping(request):
     print(f"[PING] Request received from {request.META.get('REMOTE_ADDR')}")
     return Response({'status': 'ok'})
 
-@api_view(['POST'])
-def send_otp(request):
-    """
-    Send OTP to phone number
-    Body: { "phone": "+1234567890" }
-    """
-    print(f"[SEND_OTP] Request received from {request.META.get('REMOTE_ADDR')}")
-    try:
-        phone = request.data.get('phone')
-        auth_type = request.data.get('type')  # 'login' or 'signup'
-        print(f"[SEND_OTP] Phone: {phone}, Type: {auth_type}")
-        
-        if not phone:
-            return Response(
-                {'error': 'Phone number is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Validate phone format (basic validation)
-        if not phone.startswith('+') or len(phone) < 10:
-            return Response(
-                {'error': 'Invalid phone number format. Use international format: +1234567890'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Check user existence based on flow type
-        users = get_users_collection()
-        user_exists = users.find_one({'phone': phone}) is not None
-        
-        if auth_type == 'login' and not user_exists:
-            return Response(
-                {'error': 'No account found with this phone number. Please sign up first.'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-            
-        if auth_type == 'signup' and user_exists:
-            return Response(
-                {'error': 'An account with this phone number already exists. Please log in.'},
-                status=status.HTTP_409_CONFLICT
-            )
-        
-        # Generate and send OTP
-        otp = generate_otp(phone)
-        
-        # In production, send OTP via SMS here
-        # Example: send_sms(phone, f"Your ALINGO verification code is: {otp}")
-        
-        return Response({
-            'message': 'OTP sent successfully',
-            'phone': phone,
-            # In development, return OTP for testing
-            # Remove this in production!
-            'otp': otp  # For development only
-        }, status=status.HTTP_200_OK)
-        
-    except Exception as e:
-        return Response(
-            {'error': str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
-@api_view(['POST'])
-def verify_otp_endpoint(request):
-    """
-    Verify OTP for phone number and login/signup user
-    Body: { "phone": "+1234567890", "otp": "123456" }
-    """
-    print(f"[VERIFY_OTP] Request received from {request.META.get('REMOTE_ADDR')}")
-    try:
-        phone = request.data.get('phone')
-        otp_code = request.data.get('otp')
-        print(f"[VERIFY_OTP] Phone: {phone}, OTP: {otp_code}")
-        
-        if not phone or not otp_code:
-            return Response(
-                {'error': 'Phone number and OTP are required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Verify OTP
-        success, message = verify_otp(phone, otp_code)
-        
-        if success:
-            # Check if user exists
-            user = AuthService.get_user_by_phone(phone)
-            
-            if not user:
-                # Create new user (Signup)
-                print(f"Creating new user for phone: {phone}")
-                profile_data = {
-                    'full_name': request.data.get('fullName', ''),
-                    'age': request.data.get('age', ''),
-                    'gender': request.data.get('gender', ''),
-                    'bio': request.data.get('bio', '')
-                }
-                user = AuthService.create_user_by_phone(phone, profile_data=profile_data)
-            
-            # Generate JWT
-            from apps.verification.auth_middleware import generate_jwt
-            token = generate_jwt(user['user_id'], phone)
-            user['token'] = token
-            
-            return Response(user, status=status.HTTP_200_OK)
-        else:
-            return Response({
-                'verified': False,
-                'error': message
-            }, status=status.HTTP_400_BAD_REQUEST)
-            
-    except Exception as e:
-        print(f"Verify OTP Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return Response(
-            {'error': str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
 
 @api_view(['POST'])
 def signup(request):
     """
-    Register a new user
-    
-    Supports two authentication methods:
-    1. Firebase token (legacy): { "firebase_token": "..." }
-    2. Backend OTP verified token: { "firebase_token": "verified_+1234567890_..." }
+    Register a new user using Firebase Phone Auth
+    Body: { "firebase_token": "...", "fullName": "...", "dob": "...", "gender": "...", "bio": "..." }
     """
     try:
         firebase_token = request.data.get('firebase_token')
@@ -151,47 +29,45 @@ def signup(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Check if this is a backend OTP verified token
-        if firebase_token.startswith('verified_'):
-            # Extract phone from token: verified_+1234567890_timestamp
-            parts = firebase_token.split('_')
-            print(f"Token parts: {parts}")
-            
-            if len(parts) >= 2:
-                phone = parts[1]
-                print(f"Extracted phone: {phone}")
-                # Create user by phone
-                user = AuthService.create_user_by_phone(phone)
-                print(f"User created successfully: {user}")
-                
-                # Generate JWT token
-                from apps.verification.auth_middleware import generate_jwt
-                token = generate_jwt(user['user_id'], phone)
-                
-                # Add token to response
-                user['token'] = token
-                
-                return Response(user, status=status.HTTP_201_CREATED)
-            else:
-                print(f"Invalid token format, parts length: {len(parts)}")
-                return Response(
-                    {'error': 'Invalid verification token'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        else:
-            # Firebase flow
-            user_info = AuthService.verify_and_extract_user_info(firebase_token)
-            user = AuthService.create_user(
-                firebase_uid=user_info['firebase_uid'],
-                phone=user_info['phone']
+        # Verify Firebase Token
+        user_info = AuthService.verify_and_extract_user_info(firebase_token)
+        phone = user_info['phone']
+        
+        # Extract profile data
+        profile_data = {
+            'full_name': request.data.get('fullName', ''),
+            'dob': request.data.get('dob', ''),
+            'gender': request.data.get('gender', ''),
+            'bio': request.data.get('bio', '')
+        }
+        
+        # Check if user exists before creating
+        existing = AuthService.get_user_by_phone(phone)
+        if existing:
+            return Response(
+                {'error': 'An account with this phone number already exists. Please login instead.'},
+                status=status.HTTP_400_BAD_REQUEST
             )
             
-            # Generate JWT token
-            from apps.verification.auth_middleware import generate_jwt
-            token = generate_jwt(user['user_id'], user_info['phone'])
-            user['token'] = token
-            
-            return Response(user, status=status.HTTP_201_CREATED)
+        print(f"Creating new user for phone: {phone}")
+        # Create user by phone (which mimics our previous verified approach but now guaranteed by Firebase)
+        # Note: We are using create_user_by_phone instead of create_user to pass complete profile data
+        user = AuthService.create_user_by_phone(phone, profile_data=profile_data)
+        
+        # We need to manually link the firebase UID since create_user_by_phone sets it to None
+        users_col = get_users_collection()
+        users_col.update_one(
+            {'phone': phone},
+            {'$set': {'firebase_uid': user_info['firebase_uid']}}
+        )
+        user['firebase_uid'] = user_info['firebase_uid']
+        
+        # Generate JWT token
+        from apps.verification.auth_middleware import generate_jwt
+        token = generate_jwt(user['user_id'], phone)
+        user['token'] = token
+        
+        return Response(user, status=status.HTTP_201_CREATED)
         
     except ValueError as e:
         print(f"ValueError during signup: {str(e)}")
@@ -218,11 +94,8 @@ def signup(request):
 @api_view(['POST'])
 def login(request):
     """
-    Login existing user
-    
-    Supports two authentication methods:
-    1. Firebase token (legacy): { "firebase_token": "..." }
-    2. Backend OTP verified token: { "firebase_token": "verified_+1234567890_..." }
+    Login existing user using Firebase Phone Auth
+    Body: { "firebase_token": "..." }
     """
     try:
         firebase_token = request.data.get('firebase_token')
@@ -233,49 +106,33 @@ def login(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Check if this is a backend OTP verified token
-        if firebase_token.startswith('verified_'):
-            # Extract phone from token: verified_+1234567890_timestamp
-            parts = firebase_token.split('_')
-            if len(parts) >= 2:
-                phone = parts[1]
-                # Get user by phone
-                user = AuthService.get_user_by_phone(phone)
-                
-                if not user:
-                    return Response(
-                        {'error': 'User not found. Please sign up first.'},
-                        status=status.HTTP_404_NOT_FOUND
-                    )
-                
-                # Generate JWT token
-                from apps.verification.auth_middleware import generate_jwt
-                token = generate_jwt(user['user_id'], phone)
-                user['token'] = token
-                
-                return Response(user, status=status.HTTP_200_OK)
-            else:
-                return Response(
-                    {'error': 'Invalid verification token'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        else:
-            # Firebase flow
-            user_info = AuthService.verify_and_extract_user_info(firebase_token)
-            user = AuthService.get_user_by_firebase_uid(user_info['firebase_uid'])
+        # Verify Firebase token
+        user_info = AuthService.verify_and_extract_user_info(firebase_token)
+        phone = user_info['phone']
+        
+        # Get user by phone
+        user = AuthService.get_user_by_phone(phone)
+        
+        if not user:
+            return Response(
+                {'error': 'User not found. Please sign up first.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
             
-            if not user:
-                return Response(
-                    {'error': 'User not found. Please sign up first.'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-            
-            # Generate JWT token
-            from apps.verification.auth_middleware import generate_jwt
-            token = generate_jwt(user['user_id'], user_info['phone'])
-            user['token'] = token
-            
-            return Response(user, status=status.HTTP_200_OK)
+        # Optional: ensure firebase_uid is linked in case of legacy records
+        if not user.get('firebase_uid'):
+            users_col = get_users_collection()
+            users_col.update_one(
+                {'phone': phone},
+                {'$set': {'firebase_uid': user_info['firebase_uid']}}
+            )
+        
+        # Generate JWT token
+        from apps.verification.auth_middleware import generate_jwt
+        token = generate_jwt(user['user_id'], phone)
+        user['token'] = token
+        
+        return Response(user, status=status.HTTP_200_OK)
         
     except ValueError as e:
         return Response(

@@ -12,6 +12,7 @@ from bson import ObjectId
 from apps.verification.auth_middleware import verified_required
 from database.mongo import get_users_collection, get_rides_collection
 from .services import RideService
+from apps.users.notifications import send_push_notification, send_bulk_notifications
 
 
 # ─────────────────────────────────────────────────────────
@@ -249,6 +250,19 @@ def request_ride(request):
         )
 
         print(f'[RIDE_REQUEST] User {user_id} → ride {ride_id_str}')
+
+        # Notify the ride creator
+        users = get_users_collection()
+        requester = users.find_one({'_id': user_oid}, {'full_name': 1, 'phone': 1})
+        requester_name = (requester or {}).get('full_name') or (requester or {}).get('phone', 'Someone')
+        dest_name = ride.get('destination', {}).get('name', 'a ride')
+        send_push_notification(
+            ride['creator_id'],
+            'New Ride Request 🙋',
+            f'{requester_name} wants to join your ride to {dest_name}',
+            {'type': 'ride_request', 'ride_id': ride_id_str},
+        )
+
         return Response({'message': 'Request sent'}, status=status.HTTP_200_OK)
 
     except Exception as e:
@@ -342,6 +356,24 @@ def respond_ride(request):
 
         msg = 'User approved' if action == 'APPROVE' else 'User rejected'
         print(f'[RIDE_RESPOND] Creator {caller_id} → {action} user {target_id_str} on ride {ride_id_str}')
+
+        # Notify the requesting user about outcome
+        dest_name = ride.get('destination', {}).get('name', 'the ride')
+        if action == 'APPROVE':
+            send_push_notification(
+                target_oid,
+                'Request Approved ✅',
+                f'Your request to join the ride to {dest_name} was approved!',
+                {'type': 'ride_approved', 'ride_id': ride_id_str},
+            )
+        else:
+            send_push_notification(
+                target_oid,
+                'Request Declined',
+                f'Your request to join the ride to {dest_name} was declined.',
+                {'type': 'ride_rejected', 'ride_id': ride_id_str},
+            )
+
         return Response({'message': msg}, status=status.HTTP_200_OK)
 
     except Exception as e:
@@ -429,6 +461,18 @@ def complete_ride(request):
             )
 
             print(f'[COMPLETE] Ride {ride_id_str} COMPLETED — {len(eligible)} buddies matched')
+
+            # Notify all participants
+            dest_name = ride.get('destination', {}).get('name', 'your destination')
+            other_ids = [uid for uid in eligible if uid != caller_oid]
+            if other_ids:
+                send_bulk_notifications(
+                    other_ids,
+                    'Ride Completed 🎉',
+                    f'Your ride to {dest_name} has been completed! Don\'t forget to leave a review.',
+                    {'type': 'ride_completed', 'ride_id': ride_id_str},
+                )
+
             return Response({'message': 'Ride completed', 'status': 'COMPLETED'}, status=status.HTTP_200_OK)
 
         # Vote recorded but not yet majority
@@ -487,7 +531,19 @@ def cancel_ride(request):
             return Response({'error': 'Only active rides can be canceled.'}, status=status.HTTP_400_BAD_REQUEST)
             
         rides.update_one({'_id': ride_oid}, {'$set': {'status': 'CANCELED'}})
-        
+
+        # Notify all approved participants
+        participants = ride.get('participants', [])
+        approved_ids = [p['user_id'] for p in participants if p.get('status') == 'APPROVED']
+        if approved_ids:
+            dest_name = ride.get('destination', {}).get('name', 'a ride')
+            send_bulk_notifications(
+                approved_ids,
+                'Ride Cancelled ❌',
+                f'The ride to {dest_name} has been cancelled by the creator.',
+                {'type': 'ride_cancelled', 'ride_id': str(ride_oid)},
+            )
+
         return Response({'message': 'Ride canceled successfully.'}, status=status.HTTP_200_OK)
         
     except Exception as e:

@@ -46,7 +46,7 @@ def get_me(request):
             'rides_completed':     rides_completed,
             'reviews_count':       reviews_count,
             'gender':              user.get('gender', ''),
-            'age':                 user.get('age', ''),
+            'dob':                 user.get('dob', ''),
         }, status=status.HTTP_200_OK)
 
     except Exception as e:
@@ -290,3 +290,33 @@ def user_reviews(request, user_id):
         print(f'[USER_REVIEWS ERROR] {e}')
         import traceback; traceback.print_exc()
         return Response({'error': 'Failed to fetch reviews.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ─────────────────────────────────────────────────────────
+# POST /users/push-token  — Store Expo push token
+# ─────────────────────────────────────────────────────────
+@api_view(['POST'])
+@verified_required
+def register_push_token(request):
+    """
+    POST /users/push-token
+    Body: { "token": "ExponentPushToken[xxx]" }
+    Stores the device's Expo push token for push notifications.
+    """
+    try:
+        token = request.data.get('token')
+        if not token:
+            return Response({'error': 'token is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        users = get_users_collection()
+        users.update_one(
+            {'_id': ObjectId(request.user_id)},
+            {'$set': {'expo_push_token': token}},
+        )
+
+        print(f'[PUSH TOKEN] Stored for user {request.user_id}')
+        return Response({'message': 'Push token registered.'}, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        print(f'[PUSH TOKEN ERROR] {e}')
+        return Response({'error': 'Failed to register push token.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
