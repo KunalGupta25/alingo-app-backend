@@ -66,6 +66,9 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'config.wsgi.application'
 
+# Use signed cookies for sessions instead of DB to avoid SQLite missing table errors on Railway's ephemeral file system
+SESSION_ENGINE = 'django.contrib.sessions.backends.signed_cookies'
+
 # Database (SQLite for Django admin/sessions, MongoDB for app data)
 DATABASES = {
     'default': {
