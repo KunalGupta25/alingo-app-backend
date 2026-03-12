@@ -10,8 +10,126 @@ def ping(request):
     """Health check endpoint"""
     print(f"[PING] Request received from {request.META.get('REMOTE_ADDR')}")
     return Response({'status': 'ok'})
+from .otp_service import generate_otp, verify_otp
 
 
+@api_view(['POST'])
+def send_otp(request):
+    """
+    Send OTP to phone number
+    Body: { "phone": "+1234567890" }
+    """
+    print(f"[SEND_OTP] Request received from {request.META.get('REMOTE_ADDR')}")
+    try:
+        phone = request.data.get('phone')
+        auth_type = request.data.get('type')  # 'login' or 'signup'
+        print(f"[SEND_OTP] Phone: {phone}, Type: {auth_type}")
+        
+        if not phone:
+            return Response(
+                {'error': 'Phone number is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate phone format (basic validation)
+        if not phone.startswith('+') or len(phone) < 10:
+            return Response(
+                {'error': 'Invalid phone number format. Use international format: +1234567890'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check user existence based on flow type
+        users = get_users_collection()
+        user_exists = users.find_one({'phone': phone}) is not None
+        
+        if auth_type == 'login' and not user_exists:
+            return Response(
+                {'error': 'No account found with this phone number. Please sign up first.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+            
+        if auth_type == 'signup' and user_exists:
+            return Response(
+                {'error': 'An account with this phone number already exists. Please log in.'},
+                status=status.HTTP_409_CONFLICT
+            )
+        
+        # Generate and send OTP
+        otp = generate_otp(phone)
+        
+        # In production, send OTP via SMS here
+        # Example: send_sms(phone, f"Your ALINGO verification code is: {otp}")
+        
+        return Response({
+            'message': 'OTP sent successfully',
+            'phone': phone,
+            # In development, return OTP for testing
+            # Remove this in production!
+            'otp': otp  # For development only
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+@api_view(['POST'])
+def verify_otp_endpoint(request):
+    """
+    Verify OTP for phone number and login/signup user
+    Body: { "phone": "+1234567890", "otp": "123456" }
+    """
+    print(f"[VERIFY_OTP] Request received from {request.META.get('REMOTE_ADDR')}")
+    try:
+        phone = request.data.get('phone')
+        otp_code = request.data.get('otp')
+        print(f"[VERIFY_OTP] Phone: {phone}, OTP: {otp_code}")
+        
+        if not phone or not otp_code:
+            return Response(
+                {'error': 'Phone number and OTP are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Verify OTP
+        success, message = verify_otp(phone, otp_code)
+        
+        if success:
+            # Check if user exists
+            user = AuthService.get_user_by_phone(phone)
+            
+            if not user:
+                # Create new user (Signup)
+                print(f"Creating new user for phone: {phone}")
+                profile_data = {
+                    'full_name': request.data.get('fullName', ''),
+                    'dob': request.data.get('dob', ''),
+                    'gender': request.data.get('gender', ''),
+                    'bio': request.data.get('bio', '')
+                }
+                user = AuthService.create_user_by_phone(phone, profile_data=profile_data)
+            
+            # Generate JWT
+            from apps.verification.auth_middleware import generate_jwt
+            token = generate_jwt(user['user_id'], phone)
+            user['token'] = token
+            
+            return Response(user, status=status.HTTP_200_OK)
+        else:
+            return Response({
+                'verified': False,
+                'error': message
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+    except Exception as e:
+        print(f"Verify OTP Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 
 @api_view(['POST'])
