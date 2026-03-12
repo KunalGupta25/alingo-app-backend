@@ -12,7 +12,7 @@ load_dotenv()
 
 # Django settings
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-default-key-change-this')
-DEBUG = True
+DEBUG = os.getenv('DEBUG', 'True') == 'True'
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
 
 
@@ -114,6 +114,10 @@ CORS_ALLOW_ALL_ORIGINS = os.getenv('DEBUG', 'True') == 'True'  # Only allow all 
 if not CORS_ALLOW_ALL_ORIGINS:
     CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', '').split(',')
 CORS_ALLOW_CREDENTIALS = True
+
+# Railway CSRF and Proxy Settings
+CSRF_TRUSTED_ORIGINS = ['https://alingo-app-backend-production.up.railway.app']
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 # REST Framework settings
 REST_FRAMEWORK = {
