@@ -12,7 +12,7 @@ load_dotenv()
 
 # Django settings
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-default-key-change-this')
-DEBUG = os.getenv('DEBUG', 'True') == 'True'
+DEBUG = True
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
 
 
