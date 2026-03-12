@@ -12,6 +12,8 @@ def ping(request):
     return Response({'status': 'ok'})
 
 
+
+
 @api_view(['POST'])
 def signup(request):
     """
