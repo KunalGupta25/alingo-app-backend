@@ -39,6 +39,7 @@ def generate_otp(phone):
                 'created_at': datetime.utcnow(),
             }
         },
+        upsert=True,
     )
     
     # Log generation
