@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from bson import ObjectId
 import uuid
 from apps.core.firebase_utils import verify_firebase_token
@@ -7,6 +7,62 @@ from database.mongo import get_users_collection
 
 class AuthService:
     """Service layer for authentication business logic"""
+
+    @staticmethod
+    def _normalize_dob(profile_data):
+        """Return a stable ISO datetime string for DOB when one is provided."""
+        dob_value = (profile_data or {}).get('dob')
+        if not dob_value:
+            return ''
+
+        if isinstance(dob_value, datetime):
+            parsed_dob = dob_value
+        else:
+            dob_text = str(dob_value).strip()
+            if not dob_text:
+                return ''
+
+            if dob_text.endswith('Z'):
+                dob_text = dob_text[:-1] + '+00:00'
+
+            try:
+                parsed_dob = datetime.fromisoformat(dob_text)
+            except ValueError:
+                return str(dob_value)
+
+        if parsed_dob.tzinfo is None:
+            parsed_dob = parsed_dob.replace(tzinfo=timezone.utc)
+
+        return parsed_dob.isoformat()
+
+    @staticmethod
+    def _calculate_age_from_dob(dob_value):
+        """Calculate integer age from a DOB string or datetime when possible."""
+        if not dob_value:
+            return ''
+
+        if isinstance(dob_value, datetime):
+            parsed_dob = dob_value
+        else:
+            dob_text = str(dob_value).strip()
+            if not dob_text:
+                return ''
+
+            if dob_text.endswith('Z'):
+                dob_text = dob_text[:-1] + '+00:00'
+
+            try:
+                parsed_dob = datetime.fromisoformat(dob_text)
+            except ValueError:
+                return ''
+
+        today = datetime.now(timezone.utc).date()
+        birth_date = parsed_dob.date()
+        age = today.year - birth_date.year
+        if (today.month, today.day) < (birth_date.month, birth_date.day):
+            age -= 1
+
+        return max(age, 0)
     
     @staticmethod
     def verify_and_extract_user_info(firebase_token):
@@ -118,7 +174,7 @@ class AuthService:
         
         Args:
             phone: Phone number
-            profile_data: Optional dict with full_name, age, gender, bio
+            profile_data: Optional dict with full_name, dob, gender, bio
             
         Returns:
             dict: Created user document
@@ -137,6 +193,8 @@ class AuthService:
         
         # Generate unique user ID
         uid = str(uuid.uuid4())
+        normalized_dob = AuthService._normalize_dob(profile_data)
+        derived_age = AuthService._calculate_age_from_dob(normalized_dob)
         
         user_doc = {
             'uid': uid,
@@ -151,7 +209,8 @@ class AuthService:
             'rides_completed': 0,
             'reviews_count': 0,
             'full_name': profile_data.get('full_name', ''),
-            'age': profile_data.get('age', ''),
+            'age': derived_age,
+            'dob': normalized_dob,
             'gender': profile_data.get('gender', ''),
             'bio': profile_data.get('bio', '')
         }
