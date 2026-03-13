@@ -7,7 +7,7 @@ from django.utils.html import format_html
 from django.shortcuts import render, redirect
 from django.urls import path
 from django.http import HttpResponseRedirect
-from database.mongo import get_users_collection
+from database.mongo import get_users_collection, MongoDB
 from .services import VerificationService
 from .auth import admin_login_required, admin_login, admin_logout
 from bson import ObjectId
@@ -27,6 +27,7 @@ class VerificationAdmin:
             path('logout/', admin_logout, name='admin_logout'),
             path('<str:verification_id>/approve/', self.approve_verification, name='approve_verification'),
             path('<str:verification_id>/reject/', self.reject_verification, name='reject_verification'),
+            path('otp-logs/', self.otp_logs_view, name='otp_logs'),
         ]
         return urls
     
@@ -159,6 +160,30 @@ class VerificationAdmin:
             messages.error(request, f'Error rejecting verification: {str(e)}')
         
         return HttpResponseRedirect('/verification-panel/')
+    
+    @admin_login_required
+    def otp_logs_view(self, request):
+        """Display list of OTP generation and verification logs"""
+        logs_collection = MongoDB.get_collection('otp_logs')
+        
+        # Get latest 200 logs sorted by timestamp descending
+        logs_cursor = logs_collection.find().sort('timestamp', -1).limit(200)
+        logs = list(logs_cursor)
+        
+        # Format timestamps
+        for log in logs:
+            if 'timestamp' in log and log['timestamp']:
+                log['timestamp_formatted'] = log['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                log['timestamp_formatted'] = 'N/A'
+                
+        context = {
+            'logs': logs,
+            'title': 'OTP Verification Logs',
+            'has_logs': len(logs) > 0,
+        }
+        
+        return render(request, 'admin/otp_logs.html', context)
 
 
 # Create instance

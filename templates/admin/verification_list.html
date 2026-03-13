@@ -295,7 +295,10 @@
 <body>
     <div class="container">
         <div class="header">
-            <a href="/verification-panel/logout/" class="logout-btn">Logout</a>
+            <div style="position: absolute; top: 30px; right: 30px; display: flex; gap: 15px;">
+                <a href="/verification-panel/otp-logs/" class="logout-btn" style="position: static;">View OTP Logs</a>
+                <a href="/verification-panel/logout/" class="logout-btn" style="position: static;">Logout</a>
+            </div>
             <h1>{{ title }}</h1>
             <p>Review and approve identity verifications</p>
 
