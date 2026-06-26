@@ -1,17 +1,18 @@
 """
 JWT Authentication Middleware
-Simple JWT verification for demonstration
-In production, use djangorestframework-simplejwt or similar
+Provides JWT generation and verification for API authentication.
 """
 import jwt
+import logging
+from datetime import datetime, timedelta, timezone
 from django.conf import settings
 from rest_framework.response import Response
 from rest_framework import status
 from functools import wraps
 
+logger = logging.getLogger(__name__)
 
-# Simple JWT secret (in production, use environment variable)
-JWT_SECRET = 'your-secret-key-change-in-production'
+JWT_SECRET = settings.JWT_SECRET
 JWT_ALGORITHM = 'HS256'
 
 
@@ -26,13 +27,11 @@ def generate_jwt(user_id, phone):
     Returns:
         str: JWT token
     """
-    import datetime
-    
     payload = {
         'user_id': str(user_id),
         'phone': phone,
-        'exp': datetime.datetime.utcnow() + datetime.timedelta(days=7),  # 7 day expiration
-        'iat': datetime.datetime.utcnow()
+        'exp': datetime.now(timezone.utc) + timedelta(days=7),
+        'iat': datetime.now(timezone.utc),
     }
     
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
@@ -40,20 +39,25 @@ def generate_jwt(user_id, phone):
 
 def verify_jwt(token):
     """
-    Verify JWT token and extract payload
-    
+    Verify JWT token and extract payload.
+
     Args:
         token: JWT token string
-        
+
     Returns:
-        dict: Decoded payload if valid, None otherwise
+        dict: Decoded payload if valid AND has required fields, None otherwise
     """
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        # Ensure required claims are present
+        if not payload.get('user_id') or not payload.get('phone'):
+            return None
         return payload
     except jwt.ExpiredSignatureError:
+        logger.debug('[JWT] Token expired')
         return None
-    except jwt.InvalidTokenError:
+    except jwt.InvalidTokenError as e:
+        logger.debug('[JWT] Invalid token: %s', e)
         return None
 
 

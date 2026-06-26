@@ -1,18 +1,42 @@
 """
-Rides API Views — Block 5 + Block 6
-POST /rides/create   →  verified_required
-POST /rides/search   →  verified_required
+Rides API Views — Block 5-10
+All endpoints require VERIFIED status.
 """
+import logging
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from bson import ObjectId
 
 from apps.verification.auth_middleware import verified_required
 from database.mongo import get_users_collection, get_rides_collection
 from .services import RideService
 from apps.users.notifications import send_push_notification, send_bulk_notifications
+
+logger = logging.getLogger(__name__)
+
+
+def _batch_fetch_users(user_ids: list) -> dict:
+    """Batch fetch users by ObjectId list. Returns {oid: doc} dict."""
+    if not user_ids:
+        return {}
+    users = get_users_collection()
+    docs = users.find(
+        {'_id': {'$in': user_ids}},
+        {'full_name': 1, 'phone': 1},
+    )
+    return {doc['_id']: doc for doc in docs}
+
+
+def _sanitize_str(value: str, max_len: int = 200) -> str:
+    """Strip whitespace and basic HTML-like tags from user input."""
+    import re
+    if not isinstance(value, str):
+        return ''
+    value = value.strip()
+    value = re.sub(r'<[^>]+>', '', value)
+    return value[:max_len]
 
 
 # ─────────────────────────────────────────────────────────
@@ -21,17 +45,11 @@ from apps.users.notifications import send_push_notification, send_bulk_notificat
 @api_view(['POST'])
 @verified_required
 def create_ride(request):
-    """
-    POST /rides/create
-
-    Body: { destination, ride_date, ride_time, max_seats, route_polyline }
-    Returns: 201 { ride_id, status, destination, ride_date, ride_time, max_seats }
-    """
+    """POST /rides/create"""
     try:
         user_id = request.user_id
-
         users = get_users_collection()
-        user  = users.find_one({'_id': ObjectId(user_id)})
+        user = users.find_one({'_id': ObjectId(user_id)})
 
         if not user:
             return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -55,11 +73,11 @@ def create_ride(request):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        destination    = request.data.get('destination')
-        ride_date_str  = request.data.get('ride_date')
-        ride_time         = request.data.get('ride_time')
-        max_seats         = request.data.get('max_seats')
-        route_polyline    = request.data.get('route_polyline', '')
+        destination = request.data.get('destination')
+        ride_date_str = request.data.get('ride_date')
+        ride_time = request.data.get('ride_time')
+        max_seats = request.data.get('max_seats')
+        route_polyline = request.data.get('route_polyline', '')
         gender_preference = request.data.get('gender_preference', 'Any')
 
         if not destination or not ride_date_str or not ride_time or max_seats is None:
@@ -73,6 +91,9 @@ def create_ride(request):
                 {'error': 'destination must be { name, coordinates: [lng, lat] }'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # Sanitize destination name
+        destination['name'] = _sanitize_str(destination['name'], 150)
 
         try:
             max_seats = int(max_seats)
@@ -101,50 +122,35 @@ def create_ride(request):
             gender_preference=gender_preference,
         )
 
-        print(f'[RIDE_CREATE] User {user_id} → {destination["name"]} on {ride_date_str} (Prefer: {gender_preference})')
+        logger.info('[RIDE_CREATE] User %s → %s on %s', user_id, destination['name'], ride_date_str)
         return Response({
-            'ride_id':     str(ride['_id']),
-            'status':      ride['status'],
+            'ride_id': str(ride['_id']),
+            'status': ride['status'],
             'destination': ride['destination']['name'],
-            'ride_date':   ride['ride_date'],
-            'ride_time':   ride['ride_time'],
-            'max_seats':   ride['max_seats'],
+            'ride_date': ride['ride_date'],
+            'ride_time': ride['ride_time'],
+            'max_seats': ride['max_seats'],
         }, status=status.HTTP_201_CREATED)
 
     except Exception as e:
-        print(f'[RIDE_CREATE ERROR] {e}')
-        import traceback; traceback.print_exc()
+        logger.exception('[RIDE_CREATE ERROR] %s', e)
         return Response({'error': 'Failed to create ride.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # ─────────────────────────────────────────────────────────
-# BLOCK 6 — Search Rides (Find Buddy)
+# BLOCK 6 — Search Rides
 # ─────────────────────────────────────────────────────────
 @api_view(['POST'])
 @verified_required
 def search_rides(request):
-    """
-    POST /rides/search
-
-    Body:
-    {
-        "user_location":  [longitude, latitude],
-        "ride_date":      "YYYY-MM-DD",
-        "route_polyline": "encoded_string"   (optional)
-    }
-
-    Returns: [ { ride_id, creator_name, creator_rating, distance_meters,
-                 available_seats, ride_time, destination_name } ]
-    """
+    """POST /rides/search"""
     try:
         user_id = request.user_id
-
-        user_location  = request.data.get('user_location')
-        ride_date_str  = request.data.get('ride_date')
+        user_location = request.data.get('user_location')
+        ride_date_str = request.data.get('ride_date')
         route_polyline = request.data.get('route_polyline', '')
-        gender_filter  = request.data.get('gender_filter', 'All')
+        gender_filter = request.data.get('gender_filter', 'All')
 
-        # ── Validate ─────────────────────────────────────
         if not user_location or not ride_date_str:
             return Response(
                 {'error': 'user_location and ride_date are required.'},
@@ -165,19 +171,17 @@ def search_rides(request):
         if ride_date < date.today():
             return Response({'error': 'ride_date cannot be in the past.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # ── Run matching pipeline ─────────────────────────
         matches = RideService.search_rides(
-            user_id       = user_id,
-            user_location = [float(user_location[0]), float(user_location[1])],
-            ride_date     = ride_date_str,
-            user_polyline = route_polyline,
+            user_id=user_id,
+            user_location=[float(user_location[0]), float(user_location[1])],
+            ride_date=ride_date_str,
+            user_polyline=route_polyline,
         )
 
         return Response(matches, status=status.HTTP_200_OK)
 
     except Exception as e:
-        print(f'[RIDE_SEARCH ERROR] {e}')
-        import traceback; traceback.print_exc()
+        logger.exception('[RIDE_SEARCH ERROR] %s', e)
         return Response({'error': 'Search failed.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -187,17 +191,7 @@ def search_rides(request):
 @api_view(['POST'])
 @verified_required
 def request_ride(request):
-    """
-    POST /rides/request
-    Body: { "ride_id": "<ObjectId>" }
-
-    Rules:
-    - Ride must be ACTIVE
-    - Caller cannot be the creator
-    - Caller not already a participant (any status)
-    - Approved seats < max_seats
-    Adds participant with status=PENDING.
-    """
+    """POST /rides/request"""
     try:
         user_id = request.user_id
         ride_id_str = request.data.get('ride_id')
@@ -212,22 +206,18 @@ def request_ride(request):
             return Response({'error': 'Invalid ride_id.'}, status=status.HTTP_400_BAD_REQUEST)
 
         rides = get_rides_collection()
-        ride  = rides.find_one({'_id': ride_oid})
+        ride = rides.find_one({'_id': ride_oid})
 
         if not ride:
             return Response({'error': 'Ride not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Must be ACTIVE
         if ride.get('status') != 'ACTIVE':
             return Response({'error': 'This ride is no longer active.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Cannot request own ride
         if ride['creator_id'] == user_oid:
             return Response({'error': 'You cannot request to join your own ride.'}, status=status.HTTP_400_BAD_REQUEST)
 
         participants = ride.get('participants', [])
-
-        # Already a participant (any status)
         already = next((p for p in participants if p.get('user_id') == user_oid), None)
         if already:
             existing_status = already.get('status', '')
@@ -238,23 +228,21 @@ def request_ride(request):
             if existing_status == 'REJECTED':
                 return Response({'error': 'Your request was rejected by the creator.'}, status=status.HTTP_409_CONFLICT)
 
-        # Seat check — count only APPROVED participants
         approved_count = sum(1 for p in participants if p.get('status') == 'APPROVED')
         if approved_count >= ride.get('max_seats', 1):
             return Response({'error': 'This ride is full.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Atomic push
         rides.update_one(
             {'_id': ride_oid},
             {'$push': {'participants': {'user_id': user_oid, 'status': 'PENDING'}}},
         )
 
-        print(f'[RIDE_REQUEST] User {user_id} → ride {ride_id_str}')
+        logger.info('[RIDE_REQUEST] User %s → ride %s', user_id, ride_id_str)
 
-        # Notify the ride creator
-        users = get_users_collection()
-        requester = users.find_one({'_id': user_oid}, {'full_name': 1, 'phone': 1})
-        requester_name = (requester or {}).get('full_name') or (requester or {}).get('phone', 'Someone')
+        # Notify creator — batch fetch (single user but consistent pattern)
+        user_map = _batch_fetch_users([user_oid])
+        requester = user_map.get(user_oid, {})
+        requester_name = requester.get('full_name') or requester.get('phone', 'Someone')
         dest_name = ride.get('destination', {}).get('name', 'a ride')
         send_push_notification(
             ride['creator_id'],
@@ -266,33 +254,22 @@ def request_ride(request):
         return Response({'message': 'Request sent'}, status=status.HTTP_200_OK)
 
     except Exception as e:
-        print(f'[RIDE_REQUEST ERROR] {e}')
-        import traceback; traceback.print_exc()
+        logger.exception('[RIDE_REQUEST ERROR] %s', e)
         return Response({'error': 'Failed to send request.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # ─────────────────────────────────────────────────────────
-# BLOCK 7 — Creator Responds (Approve / Reject)
+# BLOCK 7 — Creator Responds
 # ─────────────────────────────────────────────────────────
 @api_view(['POST'])
 @verified_required
 def respond_ride(request):
-    """
-    POST /rides/respond
-    Body: { "ride_id": "<ObjectId>", "user_id": "<ObjectId>", "action": "APPROVE"|"REJECT" }
-
-    Rules:
-    - Only the ride creator can call this
-    - Ride must be ACTIVE
-    - Target participant must exist
-    - APPROVE: re-check seat count (avoid race conditions)
-    - Uses positional $ operator for atomic participant update
-    """
+    """POST /rides/respond"""
     try:
-        caller_id   = request.user_id
+        caller_id = request.user_id
         ride_id_str = request.data.get('ride_id')
         target_id_str = request.data.get('user_id')
-        action      = request.data.get('action', '').upper()
+        action = request.data.get('action', '').upper()
 
         if not ride_id_str or not target_id_str or not action:
             return Response(
@@ -304,29 +281,25 @@ def respond_ride(request):
             return Response({'error': 'action must be APPROVE or REJECT.'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            ride_oid   = ObjectId(ride_id_str)
+            ride_oid = ObjectId(ride_id_str)
             target_oid = ObjectId(target_id_str)
             caller_oid = ObjectId(caller_id)
         except Exception:
             return Response({'error': 'Invalid ObjectId.'}, status=status.HTTP_400_BAD_REQUEST)
 
         rides = get_rides_collection()
-        ride  = rides.find_one({'_id': ride_oid})
+        ride = rides.find_one({'_id': ride_oid})
 
         if not ride:
             return Response({'error': 'Ride not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Only creator
         if ride['creator_id'] != caller_oid:
             return Response({'error': 'Only the ride creator can respond to requests.'}, status=status.HTTP_403_FORBIDDEN)
 
-        # Must be ACTIVE
         if ride.get('status') != 'ACTIVE':
             return Response({'error': 'Cannot respond after the ride is completed or cancelled.'}, status=status.HTTP_400_BAD_REQUEST)
 
         participants = ride.get('participants', [])
-
-        # Find target participant
         target = next((p for p in participants if p.get('user_id') == target_oid), None)
         if not target:
             return Response({'error': 'User has not requested to join this ride.'}, status=status.HTTP_404_NOT_FOUND)
@@ -338,14 +311,11 @@ def respond_ride(request):
             )
 
         if action == 'APPROVE':
-            # Re-check seats (prevent race conditions)
             approved_count = sum(1 for p in participants if p.get('status') == 'APPROVED')
             if approved_count >= ride.get('max_seats', 1):
                 return Response({'error': 'Ride is full. Cannot approve more riders.'}, status=status.HTTP_400_BAD_REQUEST)
 
         new_status = 'APPROVED' if action == 'APPROVE' else 'REJECTED'
-
-        # Atomic positional update
         result = rides.update_one(
             {'_id': ride_oid, 'participants.user_id': target_oid},
             {'$set': {'participants.$.status': new_status}},
@@ -354,31 +324,26 @@ def respond_ride(request):
         if result.modified_count == 0:
             return Response({'error': 'Update failed. Please try again.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        msg = 'User approved' if action == 'APPROVE' else 'User rejected'
-        print(f'[RIDE_RESPOND] Creator {caller_id} → {action} user {target_id_str} on ride {ride_id_str}')
+        logger.info('[RIDE_RESPOND] Creator %s → %s user %s on ride %s', caller_id, action, target_id_str, ride_id_str)
 
-        # Notify the requesting user about outcome
         dest_name = ride.get('destination', {}).get('name', 'the ride')
         if action == 'APPROVE':
             send_push_notification(
-                target_oid,
-                'Request Approved ✅',
+                target_oid, 'Request Approved ✅',
                 f'Your request to join the ride to {dest_name} was approved!',
                 {'type': 'ride_approved', 'ride_id': ride_id_str},
             )
         else:
             send_push_notification(
-                target_oid,
-                'Request Declined',
+                target_oid, 'Request Declined',
                 f'Your request to join the ride to {dest_name} was declined.',
                 {'type': 'ride_rejected', 'ride_id': ride_id_str},
             )
 
-        return Response({'message': msg}, status=status.HTTP_200_OK)
+        return Response({'message': 'User approved' if action == 'APPROVE' else 'User rejected'}, status=status.HTTP_200_OK)
 
     except Exception as e:
-        print(f'[RIDE_RESPOND ERROR] {e}')
-        import traceback; traceback.print_exc()
+        logger.exception('[RIDE_RESPOND ERROR] %s', e)
         return Response({'error': 'Failed to respond.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -388,32 +353,22 @@ def respond_ride(request):
 @api_view(['POST'])
 @verified_required
 def complete_ride(request):
-    """
-    POST /rides/complete
-    Body: { "ride_id": "<ObjectId>" }
-
-    Majority vote logic:
-    - eligible = creator + all APPROVED participants
-    - majority_needed = floor(len(eligible) / 2) + 1
-    - Adds caller to completion_votes ($addToSet, idempotent)
-    - If votes >= majority_needed → COMPLETED + timestamp
-    - On completion: increments total_buddy_matches for all eligible users
-    """
+    """POST /rides/complete"""
     try:
-        caller_id   = request.user_id
+        caller_id = request.user_id
         ride_id_str = request.data.get('ride_id')
 
         if not ride_id_str:
             return Response({'error': 'ride_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            ride_oid   = ObjectId(ride_id_str)
+            ride_oid = ObjectId(ride_id_str)
             caller_oid = ObjectId(caller_id)
         except Exception:
             return Response({'error': 'Invalid ride_id.'}, status=status.HTTP_400_BAD_REQUEST)
 
         rides = get_rides_collection()
-        ride  = rides.find_one({'_id': ride_oid})
+        ride = rides.find_one({'_id': ride_oid})
 
         if not ride:
             return Response({'error': 'Ride not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -421,11 +376,10 @@ def complete_ride(request):
         if ride.get('status') != 'ACTIVE':
             return Response({'error': 'Ride is not active.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Build eligible set: creator + APPROVED participants
         participants = ride.get('participants', [])
         approved_ids = [p['user_id'] for p in participants if p.get('status') == 'APPROVED']
-        creator_oid  = ride['creator_id']
-        eligible     = list({creator_oid} | set(approved_ids))   # deduplicated
+        creator_oid = ride['creator_id']
+        eligible = list({creator_oid} | set(approved_ids))
 
         if caller_oid not in eligible:
             return Response(
@@ -433,61 +387,43 @@ def complete_ride(request):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # Atomic: add vote (idempotent — $addToSet ignores duplicates)
-        rides.update_one(
-            {'_id': ride_oid},
-            {'$addToSet': {'completion_votes': caller_oid}},
-        )
+        rides.update_one({'_id': ride_oid}, {'$addToSet': {'completion_votes': caller_oid}})
 
-        # Re-fetch to get updated vote count
-        ride         = rides.find_one({'_id': ride_oid})
+        ride = rides.find_one({'_id': ride_oid})
         current_votes = ride.get('completion_votes', [])
         majority_needed = (len(eligible) // 2) + 1
 
-        print(f'[COMPLETE] ride={ride_id_str} votes={len(current_votes)}/{majority_needed}')
+        logger.info('[COMPLETE] ride=%s votes=%d/%d', ride_id_str, len(current_votes), majority_needed)
 
         if len(current_votes) >= majority_needed:
-            # Mark ride as COMPLETED
             rides.update_one(
                 {'_id': ride_oid},
-                {'$set': {'status': 'COMPLETED', 'completed_at': datetime.utcnow()}},
+                {'$set': {'status': 'COMPLETED', 'completed_at': datetime.now(timezone.utc)}},
             )
 
-            # Increment total_buddy_matches for all eligible users
             users = get_users_collection()
-            users.update_many(
-                {'_id': {'$in': eligible}},
-                {'$inc': {'total_buddy_matches': 1}},
-            )
+            users.update_many({'_id': {'$in': eligible}}, {'$inc': {'total_buddy_matches': 1}})
 
-            print(f'[COMPLETE] Ride {ride_id_str} COMPLETED — {len(eligible)} buddies matched')
+            logger.info('[COMPLETE] Ride %s COMPLETED — %d buddies matched', ride_id_str, len(eligible))
 
-            # Notify all participants
             dest_name = ride.get('destination', {}).get('name', 'your destination')
             other_ids = [uid for uid in eligible if uid != caller_oid]
             if other_ids:
                 send_bulk_notifications(
-                    other_ids,
-                    'Ride Completed 🎉',
+                    other_ids, 'Ride Completed 🎉',
                     f'Your ride to {dest_name} has been completed! Don\'t forget to leave a review.',
                     {'type': 'ride_completed', 'ride_id': ride_id_str},
                 )
 
             return Response({'message': 'Ride completed', 'status': 'COMPLETED'}, status=status.HTTP_200_OK)
 
-        # Vote recorded but not yet majority
         return Response(
-            {
-                'message': 'Vote recorded',
-                'votes': len(current_votes),
-                'needed': majority_needed,
-            },
+            {'message': 'Vote recorded', 'votes': len(current_votes), 'needed': majority_needed},
             status=status.HTTP_200_OK,
         )
 
     except Exception as e:
-        print(f'[RIDE_COMPLETE ERROR] {e}')
-        import traceback; traceback.print_exc()
+        logger.exception('[RIDE_COMPLETE ERROR] %s', e)
         return Response({'error': 'Failed to complete ride.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -497,173 +433,145 @@ def complete_ride(request):
 @api_view(['POST'])
 @verified_required
 def cancel_ride(request):
-    """
-    POST /rides/cancel
-    Body: { "ride_id": "<ObjectId>" }
-    
-    Rules:
-    - Only creator can cancel.
-    - Status changing to CANCELED.
-    """
+    """POST /rides/cancel"""
     try:
         user_id = request.user_id
         ride_id_str = request.data.get('ride_id')
-        
+
         if not ride_id_str:
             return Response({'error': 'ride_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
-            
+
         try:
             ride_oid = ObjectId(ride_id_str)
             user_oid = ObjectId(user_id)
         except Exception:
             return Response({'error': 'Invalid ride_id.'}, status=status.HTTP_400_BAD_REQUEST)
-            
+
         rides = get_rides_collection()
         ride = rides.find_one({'_id': ride_oid})
-        
+
         if not ride:
             return Response({'error': 'Ride not found.'}, status=status.HTTP_404_NOT_FOUND)
-            
+
         if ride.get('creator_id') != user_oid:
             return Response({'error': 'Only the creator can cancel this ride.'}, status=status.HTTP_403_FORBIDDEN)
-            
+
         if ride.get('status') != 'ACTIVE':
             return Response({'error': 'Only active rides can be canceled.'}, status=status.HTTP_400_BAD_REQUEST)
-            
+
         rides.update_one({'_id': ride_oid}, {'$set': {'status': 'CANCELED'}})
 
-        # Notify all approved participants
         participants = ride.get('participants', [])
         approved_ids = [p['user_id'] for p in participants if p.get('status') == 'APPROVED']
         if approved_ids:
             dest_name = ride.get('destination', {}).get('name', 'a ride')
             send_bulk_notifications(
-                approved_ids,
-                'Ride Cancelled ❌',
+                approved_ids, 'Ride Cancelled ❌',
                 f'The ride to {dest_name} has been cancelled by the creator.',
                 {'type': 'ride_cancelled', 'ride_id': str(ride_oid)},
             )
 
         return Response({'message': 'Ride canceled successfully.'}, status=status.HTTP_200_OK)
-        
+
     except Exception as e:
-        print(f'[RIDE_CANCEL ERROR] {e}')
-        import traceback; traceback.print_exc()
+        logger.exception('[RIDE_CANCEL ERROR] %s', e)
         return Response({'error': 'Failed to cancel the ride.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # ─────────────────────────────────────────────────────────
-# BLOCK 8 — My Active Ride (used by home screen)
+# BLOCK 8 — My Active Ride
 # ─────────────────────────────────────────────────────────
 @api_view(['GET'])
 @verified_required
 def my_active_ride(request):
-    """
-    GET /rides/my-active
-
-    Returns the caller's own ACTIVE ride (if any) with:
-    - ride_id, ride_time, destination_name, max_seats, is_creator
-    - participants list: [{user_id, name, status}]
-    Returns either a ride the caller CREATED or one they have JOINED (APPROVED).
-    Used by the home screen to show the "Complete Ride" panel.
-    """
+    """GET /rides/my-active"""
     try:
-        caller_id  = request.user_id
+        caller_id = request.user_id
         caller_oid = ObjectId(caller_id)
-
         rides = get_rides_collection()
 
-        # 1. Ride the caller created
         ride = rides.find_one({'creator_id': caller_oid, 'status': 'ACTIVE'})
         is_creator = True
 
-        # 2. Fallback: a ride where the caller is an APPROVED participant
         if not ride:
             ride = rides.find_one({
                 'status': 'ACTIVE',
-                'participants': {
-                    '$elemMatch': {
-                        'user_id': caller_oid,
-                        'status': 'APPROVED',
-                    }
-                }
+                'participants': {'$elemMatch': {'user_id': caller_oid, 'status': 'APPROVED'}}
             })
             is_creator = False
 
         if not ride:
             return Response({'ride': None}, status=status.HTTP_200_OK)
 
-        # Enrich participants with names
-        users      = get_users_collection()
-        enriched   = []
+        # ── Batch fetch all participant users in ONE query ──
+        participant_oids = [p['user_id'] for p in ride.get('participants', []) if p.get('user_id')]
+        user_map = _batch_fetch_users(participant_oids)
+
+        enriched = []
         for p in ride.get('participants', []):
-            uid   = p.get('user_id')
-            pstat = p.get('status', '')
-            user  = users.find_one({'_id': uid}, {'full_name': 1, 'phone': 1})
-            name  = (user or {}).get('full_name') or (user or {}).get('phone', 'Unknown')
-            phone = (user or {}).get('phone', '')
-            enriched.append({'user_id': str(uid), 'name': name, 'phone': phone, 'status': pstat})
+            uid = p.get('user_id')
+            doc = user_map.get(uid, {})
+            enriched.append({
+                'user_id': str(uid),
+                'name': doc.get('full_name') or doc.get('phone', 'Unknown'),
+                'phone': doc.get('phone', ''),
+                'status': p.get('status', ''),
+            })
 
         votes_count = len(ride.get('completion_votes', []))
+        has_voted = caller_oid in ride.get('completion_votes', [])
         approved_count = sum(1 for p in enriched if p['status'] == 'APPROVED')
-        total_eligible = approved_count + 1  # +1 for creator
+        total_eligible = approved_count + 1
         majority_needed = (total_eligible // 2) + 1
 
-        return Response({
-            'ride': {
-                'ride_id':          str(ride['_id']),
-                'ride_time':        ride.get('ride_time', ''),
-                'destination_name': ride.get('destination', {}).get('name', ''),
-                'max_seats':        ride.get('max_seats', 1),
-                'participants':     enriched,
-                'completion_votes': votes_count,
-                'majority_needed':  majority_needed,
-                'is_creator':       is_creator,
-                'creator_id':       str(ride['creator_id']),
-                'route_polyline':   ride.get('route_polyline', ''),
-            }
-        }, status=status.HTTP_200_OK)
+        return Response({'ride': {
+            'ride_id': str(ride['_id']),
+            'ride_time': ride.get('ride_time', ''),
+            'destination_name': ride.get('destination', {}).get('name', ''),
+            'max_seats': ride.get('max_seats', 1),
+            'participants': enriched,
+            'completion_votes': votes_count,
+            'majority_needed': majority_needed,
+            'has_voted': has_voted,
+            'is_creator': is_creator,
+            'creator_id': str(ride['creator_id']),
+            'route_polyline': ride.get('route_polyline', ''),
+        }}, status=status.HTTP_200_OK)
 
     except Exception as e:
-        print(f'[MY_ACTIVE ERROR] {e}')
-        import traceback; traceback.print_exc()
+        logger.exception('[MY_ACTIVE ERROR] %s', e)
         return Response({'error': 'Failed to fetch active ride.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # ─────────────────────────────────────────────────────────
-# BLOCK 9 — My Ride Requests (for participants)
+# BLOCK 9 — My Ride Requests
 # ─────────────────────────────────────────────────────────
 @api_view(['GET'])
 @verified_required
 def my_requests(request):
-    """
-    GET /rides/my-requests
-
-    Returns all ACTIVE rides the caller has a PENDING or APPROVED participant
-    entry in (excluding rides they created). Used by riders to check their
-    join request status.
-    """
+    """GET /rides/my-requests"""
     try:
-        caller_id  = request.user_id
+        caller_id = request.user_id
         caller_oid = ObjectId(caller_id)
-
         rides = get_rides_collection()
-        users = get_users_collection()
 
         cursor = rides.find({
             'status': 'ACTIVE',
             'creator_id': {'$ne': caller_oid},
-            'participants': {
-                '$elemMatch': {
-                    'user_id': caller_oid,
-                    'status': {'$in': ['PENDING', 'APPROVED', 'REJECTED']},
-                }
-            }
+            'participants': {'$elemMatch': {
+                'user_id': caller_oid,
+                'status': {'$in': ['PENDING', 'APPROVED', 'REJECTED']},
+            }}
         })
 
+        ride_list = list(cursor)
+
+        # ── Batch fetch all creators in ONE query ──
+        creator_oids = list({r['creator_id'] for r in ride_list})
+        creator_map = _batch_fetch_users(creator_oids)
+
         result = []
-        for ride in cursor:
-            # Find this caller's participant entry
+        for ride in ride_list:
             my_entry = next(
                 (p for p in ride.get('participants', []) if p.get('user_id') == caller_oid),
                 None,
@@ -671,23 +579,22 @@ def my_requests(request):
             if not my_entry:
                 continue
 
-            creator = users.find_one({'_id': ride['creator_id']}, {'full_name': 1, 'phone': 1})
-            creator_name = (creator or {}).get('full_name') or (creator or {}).get('phone', 'Unknown')
+            creator_doc = creator_map.get(ride['creator_id'], {})
+            creator_name = creator_doc.get('full_name') or creator_doc.get('phone', 'Unknown')
 
             result.append({
-                'ride_id':          str(ride['_id']),
-                'ride_time':        ride.get('ride_time', ''),
+                'ride_id': str(ride['_id']),
+                'ride_time': ride.get('ride_time', ''),
                 'destination_name': ride.get('destination', {}).get('name', ''),
-                'creator_name':     creator_name,
-                'creator_id':       str(ride['creator_id']),
-                'my_status':        my_entry.get('status', ''),
+                'creator_name': creator_name,
+                'creator_id': str(ride['creator_id']),
+                'my_status': my_entry.get('status', ''),
             })
 
         return Response({'requests': result}, status=status.HTTP_200_OK)
 
     except Exception as e:
-        print(f'[MY_REQUESTS ERROR] {e}')
-        import traceback; traceback.print_exc()
+        logger.exception('[MY_REQUESTS ERROR] %s', e)
         return Response({'error': 'Failed to fetch ride requests.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -697,60 +604,53 @@ def my_requests(request):
 @api_view(['GET'])
 @verified_required
 def ride_detail(request):
-    """
-    GET /rides/detail?ride_id=<ride_id>
-
-    Returns full details about a specific ride:
-    - ride_id, status, destination, ride_date, ride_time, max_seats
-    - route_polyline
-    - participants list with names and phones
-    - creator info
-    """
+    """GET /rides/detail?ride_id=<ride_id>"""
     try:
         ride_id = request.query_params.get('ride_id')
         if not ride_id:
             return Response({'error': 'ride_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
         rides = get_rides_collection()
-        users = get_users_collection()
-
         ride = rides.find_one({'_id': ObjectId(ride_id)})
         if not ride:
             return Response({'error': 'Ride not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Enrich participants with names
+        # ── Batch fetch participants + creator in ONE query ──
+        participant_oids = [p['user_id'] for p in ride.get('participants', []) if p.get('user_id')]
+        all_oids = list(set(participant_oids + [ride['creator_id']]))
+        user_map = _batch_fetch_users(all_oids)
+
         enriched = []
         for p in ride.get('participants', []):
             uid = p.get('user_id')
-            pstat = p.get('status', '')
-            user = users.find_one({'_id': uid}, {'full_name': 1, 'phone': 1})
-            name = (user or {}).get('full_name') or (user or {}).get('phone', 'Unknown')
-            phone = (user or {}).get('phone', '')
-            enriched.append({'user_id': str(uid), 'name': name, 'phone': phone, 'status': pstat})
+            doc = user_map.get(uid, {})
+            enriched.append({
+                'user_id': str(uid),
+                'name': doc.get('full_name') or doc.get('phone', 'Unknown'),
+                'phone': doc.get('phone', ''),
+                'status': p.get('status', ''),
+            })
 
-        # Creator info
-        creator = users.find_one({'_id': ride['creator_id']}, {'full_name': 1, 'phone': 1})
-        creator_name = (creator or {}).get('full_name') or (creator or {}).get('phone', 'Unknown')
-
+        creator_doc = user_map.get(ride['creator_id'], {})
+        creator_name = creator_doc.get('full_name') or creator_doc.get('phone', 'Unknown')
         dest = ride.get('destination', {})
 
         return Response({
-            'ride_id':          str(ride['_id']),
-            'status':           ride.get('status', ''),
+            'ride_id': str(ride['_id']),
+            'status': ride.get('status', ''),
             'destination_name': dest.get('name', ''),
             'destination_coords': dest.get('coordinates', []),
-            'ride_date':        ride.get('ride_date', ''),
-            'ride_time':        ride.get('ride_time', ''),
-            'max_seats':        ride.get('max_seats', 1),
-            'route_polyline':   ride.get('route_polyline', ''),
-            'creator_id':       str(ride['creator_id']),
-            'creator_name':     creator_name,
-            'participants':     enriched,
+            'ride_date': ride.get('ride_date', ''),
+            'ride_time': ride.get('ride_time', ''),
+            'max_seats': ride.get('max_seats', 1),
+            'route_polyline': ride.get('route_polyline', ''),
+            'creator_id': str(ride['creator_id']),
+            'creator_name': creator_name,
+            'participants': enriched,
             'gender_preference': ride.get('gender_preference', 'Any'),
-            'created_at':       str(ride.get('created_at', '')),
+            'created_at': str(ride.get('created_at', '')),
         }, status=status.HTTP_200_OK)
 
     except Exception as e:
-        print(f'[RIDE_DETAIL ERROR] {e}')
-        import traceback; traceback.print_exc()
+        logger.exception('[RIDE_DETAIL ERROR] %s', e)
         return Response({'error': 'Failed to fetch ride details.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

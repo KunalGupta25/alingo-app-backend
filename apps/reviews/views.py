@@ -2,6 +2,7 @@
 Reviews API Views — Block 8
 POST /reviews/create  →  verified_required
 """
+import logging
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
@@ -11,6 +12,8 @@ from pymongo.errors import DuplicateKeyError
 
 from database.mongo import get_reviews_collection, get_rides_collection, get_users_collection
 from apps.verification.auth_middleware import verified_required
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────
@@ -126,6 +129,19 @@ def create_review(request):
 
         # ── Insert review (unique index prevents duplicates) ──
         reviews = get_reviews_collection()
+
+        # Explicit pre-check: avoids relying purely on DB index enforcement
+        existing = reviews.find_one({
+            'ride_id':     ride_oid,
+            'reviewer_id': reviewer_oid,
+            'reviewee_id': reviewee_oid,
+        })
+        if existing:
+            return Response(
+                {'error': 'You have already reviewed this person for this ride.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         try:
             reviews.insert_one({
                 'ride_id':     ride_oid,
@@ -144,10 +160,9 @@ def create_review(request):
         # ── Recalculate reviewee's average rating ──
         _recalculate_rating(reviewee_oid)
 
-        print(f'[REVIEW] {caller_id} → {reviewee_str} | ride={ride_id_str} | rating={rating}')
+        logger.info('[REVIEW] %s → %s | ride=%s | rating=%d', caller_id, reviewee_str, ride_id_str, rating)
         return Response({'message': 'Review submitted'}, status=status.HTTP_200_OK)
 
     except Exception as e:
-        print(f'[REVIEW ERROR] {e}')
-        import traceback; traceback.print_exc()
+        logger.exception('[REVIEW ERROR] %s', e)
         return Response({'error': 'Failed to submit review.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

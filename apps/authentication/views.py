@@ -1,29 +1,35 @@
+"""
+Authentication API Views
+OTP-based authentication with rate limiting and security controls.
+"""
+import logging
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
+from django.conf import settings
 from database.mongo import get_users_collection
 from .services import AuthService
+from .otp_service import generate_otp, verify_otp
+from apps.verification.auth_middleware import generate_jwt, verify_jwt
+
+logger = logging.getLogger(__name__)
 
 
 @api_view(['GET'])
 def ping(request):
     """Health check endpoint"""
-    print(f"[PING] Request received from {request.META.get('REMOTE_ADDR')}")
     return Response({'status': 'ok'})
-from .otp_service import generate_otp, verify_otp
 
 
 @api_view(['POST'])
 def send_otp(request):
     """
     Send OTP to phone number
-    Body: { "phone": "+1234567890" }
+    Body: { "phone": "+1234567890", "type": "login"|"signup" }
     """
-    print(f"[SEND_OTP] Request received from {request.META.get('REMOTE_ADDR')}")
     try:
         phone = request.data.get('phone')
         auth_type = request.data.get('type')  # 'login' or 'signup'
-        print(f"[SEND_OTP] Phone: {phone}, Type: {auth_type}")
         
         if not phone:
             return Response(
@@ -54,25 +60,35 @@ def send_otp(request):
                 status=status.HTTP_409_CONFLICT
             )
         
-        # Generate and send OTP
-        otp = generate_otp(phone)
+        # Generate and send OTP (may raise ValueError for rate limits)
+        try:
+            otp, sms_sent = generate_otp(phone)
+        except ValueError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
         
-        # In production, send OTP via SMS here
-        # Example: send_sms(phone, f"Your ALINGO verification code is: {otp}")
-        
-        return Response({
+        response_data = {
             'message': 'OTP sent successfully',
             'phone': phone,
-            # In development, return OTP for testing
-            # Remove this in production!
-            'otp': otp  # For development only
-        }, status=status.HTTP_200_OK)
+        }
+
+        # Only include OTP in response when DEBUG=True AND SMS was not sent
+        # This allows dev testing without an SMS provider
+        if settings.DEBUG and not sms_sent:
+            response_data['otp'] = otp
+
+        logger.info('[SEND_OTP] Phone: %s, Type: %s, SMS sent: %s', phone[-4:], auth_type, sms_sent)
+        return Response(response_data, status=status.HTTP_200_OK)
         
     except Exception as e:
+        logger.exception('[SEND_OTP ERROR] %s', e)
         return Response(
-            {'error': str(e)},
+            {'error': 'Failed to send OTP. Please try again.'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
 
 @api_view(['POST'])
 def verify_otp_endpoint(request):
@@ -80,11 +96,9 @@ def verify_otp_endpoint(request):
     Verify OTP for phone number and login/signup user
     Body: { "phone": "+1234567890", "otp": "123456" }
     """
-    print(f"[VERIFY_OTP] Request received from {request.META.get('REMOTE_ADDR')}")
     try:
         phone = request.data.get('phone')
         otp_code = request.data.get('otp')
-        print(f"[VERIFY_OTP] Phone: {phone}, OTP: {otp_code}")
         
         if not phone or not otp_code:
             return Response(
@@ -92,7 +106,7 @@ def verify_otp_endpoint(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Verify OTP
+        # Verify OTP (includes brute-force protection)
         success, message = verify_otp(phone, otp_code)
         
         if success:
@@ -101,7 +115,7 @@ def verify_otp_endpoint(request):
             
             if not user:
                 # Create new user (Signup)
-                print(f"Creating new user for phone: {phone}")
+                logger.info('[SIGNUP] Creating new user for phone: %s', phone[-4:])
                 profile_data = {
                     'full_name': request.data.get('fullName', ''),
                     'dob': request.data.get('dob', ''),
@@ -115,6 +129,7 @@ def verify_otp_endpoint(request):
             token = generate_jwt(user['user_id'], phone)
             user['token'] = token
             
+            logger.info('[VERIFY_OTP] Success for phone: %s', phone[-4:])
             return Response(user, status=status.HTTP_200_OK)
         else:
             return Response({
@@ -123,145 +138,59 @@ def verify_otp_endpoint(request):
             }, status=status.HTTP_400_BAD_REQUEST)
             
     except Exception as e:
-        print(f"Verify OTP Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        logger.exception('[VERIFY_OTP ERROR] %s', e)
         return Response(
-            {'error': str(e)},
+            {'error': 'Verification failed. Please try again.'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
 
 @api_view(['POST'])
-def signup(request):
+def refresh_token(request):
     """
-    Register a new user using Firebase Phone Auth
-    Body: { "firebase_token": "...", "fullName": "...", "dob": "...", "gender": "...", "bio": "..." }
+    POST /auth/token/refresh
+    Body: { "token": "<existing_jwt>" }
+
+    Issues a new JWT with a fresh 7-day expiry.
+    Use this when the app resumes and wants to silently extend the session
+    before the current token expires.
+
+    Returns 401 if the token is already expired or invalid.
     """
     try:
-        firebase_token = request.data.get('firebase_token')
-        
-        print(f"Signup request received with token: {firebase_token[:30] if firebase_token else 'None'}...")
-        
-        if not firebase_token:
-            return Response(
-                {'error': 'firebase_token is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Verify Firebase Token
-        user_info = AuthService.verify_and_extract_user_info(firebase_token)
-        phone = user_info['phone']
-        
-        # Extract profile data
-        profile_data = {
-            'full_name': request.data.get('fullName', ''),
-            'dob': request.data.get('dob', ''),
-            'gender': request.data.get('gender', ''),
-            'bio': request.data.get('bio', '')
-        }
-        
-        # Check if user exists before creating
-        existing = AuthService.get_user_by_phone(phone)
-        if existing:
-            return Response(
-                {'error': 'An account with this phone number already exists. Please login instead.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-            
-        print(f"Creating new user for phone: {phone}")
-        # Create user by phone (which mimics our previous verified approach but now guaranteed by Firebase)
-        # Note: We are using create_user_by_phone instead of create_user to pass complete profile data
-        user = AuthService.create_user_by_phone(phone, profile_data=profile_data)
-        
-        # We need to manually link the firebase UID since create_user_by_phone sets it to None
-        users_col = get_users_collection()
-        users_col.update_one(
-            {'phone': phone},
-            {'$set': {'firebase_uid': user_info['firebase_uid']}}
-        )
-        user['firebase_uid'] = user_info['firebase_uid']
-        
-        # Generate JWT token
-        from apps.verification.auth_middleware import generate_jwt
-        token = generate_jwt(user['user_id'], phone)
-        user['token'] = token
-        
-        return Response(user, status=status.HTTP_201_CREATED)
-        
-    except ValueError as e:
-        print(f"ValueError during signup: {str(e)}")
-        
-        # Provide user-friendly error messages
-        error_message = str(e)
-        if "already exists" in error_message.lower():
-            error_message = "An account with this phone number already exists. Please login instead."
-        
-        return Response(
-            {'error': error_message},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    except Exception as e:
-        print(f"Signup error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return Response(
-            {'error': 'Unable to create account. Please try again later.'},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
+        old_token = request.data.get('token')
+        if not old_token:
+            return Response({'error': 'token is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-
-@api_view(['POST'])
-def login(request):
-    """
-    Login existing user using Firebase Phone Auth
-    Body: { "firebase_token": "..." }
-    """
-    try:
-        firebase_token = request.data.get('firebase_token')
-        
-        if not firebase_token:
+        payload = verify_jwt(old_token)
+        if not payload:
             return Response(
-                {'error': 'firebase_token is required'},
-                status=status.HTTP_400_BAD_REQUEST
+                {'error': 'Token is invalid or expired. Please log in again.'},
+                status=status.HTTP_401_UNAUTHORIZED,
             )
-        
-        # Verify Firebase token
-        user_info = AuthService.verify_and_extract_user_info(firebase_token)
-        phone = user_info['phone']
-        
-        # Get user by phone
-        user = AuthService.get_user_by_phone(phone)
-        
+
+        # Verify user still exists
+        from bson import ObjectId
+        users = get_users_collection()
+        user = users.find_one(
+            {'_id': ObjectId(payload['user_id'])},
+            {'phone': 1, 'verification_status': 1},
+        )
         if not user:
             return Response(
-                {'error': 'User not found. Please sign up first.'},
-                status=status.HTTP_404_NOT_FOUND
+                {'error': 'User not found.'},
+                status=status.HTTP_401_UNAUTHORIZED,
             )
-            
-        # Optional: ensure firebase_uid is linked in case of legacy records
-        if not user.get('firebase_uid'):
-            users_col = get_users_collection()
-            users_col.update_one(
-                {'phone': phone},
-                {'$set': {'firebase_uid': user_info['firebase_uid']}}
-            )
-        
-        # Generate JWT token
-        from apps.verification.auth_middleware import generate_jwt
-        token = generate_jwt(user['user_id'], phone)
-        user['token'] = token
-        
-        return Response(user, status=status.HTTP_200_OK)
-        
-    except ValueError as e:
-        return Response(
-            {'error': str(e)},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+
+        new_token = generate_jwt(payload['user_id'], payload['phone'])
+        logger.info('[TOKEN_REFRESH] Issued new token for user %s', payload['user_id'])
+
+        return Response({
+            'token': new_token,
+            'verification_status': user.get('verification_status', 'UNVERIFIED'),
+        }, status=status.HTTP_200_OK)
+
     except Exception as e:
-        print(f"Login error: {str(e)}")
-        return Response(
-            {'error': 'Internal server error'},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
+        logger.exception('[TOKEN_REFRESH ERROR] %s', e)
+        return Response({'error': 'Failed to refresh token.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+

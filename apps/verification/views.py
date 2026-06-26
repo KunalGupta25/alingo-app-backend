@@ -2,6 +2,7 @@
 Verification API Views
 Handles identity verification submission and status checking
 """
+import logging
 from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
@@ -14,7 +15,9 @@ from .auth_middleware import jwt_required
 from database.mongo import get_users_collection
 from bson import ObjectId
 import os
-from datetime import datetime
+from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 
 @api_view(['POST'])
@@ -46,10 +49,7 @@ def submit_verification(request):
         document_image = request.FILES.get('document_image')
         face_image = request.FILES.get('face_image')
         
-        print(f"[VERIFICATION] Submission from user {user_id}")
-        print(f"[VERIFICATION] Document type: {document_type}")
-        print(f"[VERIFICATION] Has document image: {document_image is not None}")
-        print(f"[VERIFICATION] Has face image: {face_image is not None}")
+        logger.info('[VERIFICATION] Submission from user %s, doc_type=%s', user_id, document_type)
         
         # Validate all fields present
         if not document_type or not document_image or not face_image:
@@ -91,7 +91,7 @@ def submit_verification(request):
         os.makedirs(media_path, exist_ok=True)
         
         # Generate unique filenames
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
         doc_filename = f"{user_id}_doc_{timestamp}.jpg"
         face_filename = f"{user_id}_face_{timestamp}.jpg"
         
@@ -102,8 +102,7 @@ def submit_verification(request):
         doc_saved_path = default_storage.save(document_path, ContentFile(document_image.read()))
         face_saved_path = default_storage.save(face_path, ContentFile(face_image.read()))
         
-        print(f"[VERIFICATION] Document saved: {doc_saved_path}")
-        print(f"[VERIFICATION] Face saved: {face_saved_path}")
+        logger.info('[VERIFICATION] Doc saved: %s | Face saved: %s', doc_saved_path, face_saved_path)
         
         # Create verification record
         verification = VerificationService.create_verification(
@@ -113,17 +112,14 @@ def submit_verification(request):
             face_path=face_saved_path
         )
         
-        print(f"[VERIFICATION] Created verification record: {verification['_id']}")
-        
+        logger.info('[VERIFICATION] Created record %s, updated user to PENDING', verification['_id'])
         # Update user verification_status to PENDING
         users = get_users_collection()
         users.update_one(
             {'_id': ObjectId(user_id)},
             {'$set': {'verification_status': 'PENDING'}}
         )
-        
-        print(f"[VERIFICATION] Updated user status to PENDING")
-        
+
         return Response({
             'message': 'Verification submitted successfully',
             'verification_id': str(verification['_id']),
@@ -131,9 +127,7 @@ def submit_verification(request):
         }, status=status.HTTP_201_CREATED)
         
     except Exception as e:
-        print(f"[VERIFICATION ERROR] {str(e)}")
-        import traceback
-        traceback.print_exc()
+        logger.exception('[VERIFICATION ERROR] %s', e)
         return Response(
             {'error': 'Failed to submit verification. Please try again.'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -158,7 +152,7 @@ def get_verification_status(request):
     try:
         user_id = request.user_id
         
-        print(f"[VERIFICATION] Status check for user {user_id}")
+        logger.info('[VERIFICATION] Status check for user %s', user_id)
         
         # Get user from database
         users = get_users_collection()
@@ -183,14 +177,12 @@ def get_verification_status(request):
         if verification and verification.get('status') == 'REJECTED':
             response_data['rejection_reason'] = verification.get('rejection_reason')
         
-        print(f"[VERIFICATION] Status: {response_data}")
+        logger.debug('[VERIFICATION] Status response: %s', response_data)
         
         return Response(response_data, status=status.HTTP_200_OK)
         
     except Exception as e:
-        print(f"[VERIFICATION STATUS ERROR] {str(e)}")
-        import traceback
-        traceback.print_exc()
+        logger.exception('[VERIFICATION STATUS ERROR] %s', e)
         return Response(
             {'error': 'Failed to check verification status'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR

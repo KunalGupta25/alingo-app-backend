@@ -1,8 +1,20 @@
+import re
+import logging
 from datetime import datetime, timezone
 from bson import ObjectId
 import uuid
-from apps.core.firebase_utils import verify_firebase_token
 from database.mongo import get_users_collection
+
+logger = logging.getLogger(__name__)
+
+
+def _sanitize(value: str, max_len: int = 200) -> str:
+    """Strip whitespace and basic HTML tags from a string input."""
+    if not isinstance(value, str):
+        return ''
+    value = value.strip()
+    value = re.sub(r'<[^>]+>', '', value)
+    return value[:max_len]
 
 
 class AuthService:
@@ -65,103 +77,11 @@ class AuthService:
         return max(age, 0)
     
     @staticmethod
-    def verify_and_extract_user_info(firebase_token):
-        """
-        Verify Firebase token and extract user information
-        
-        Args:
-            firebase_token: Firebase ID token string
-            
-        Returns:
-            dict: User info with firebase_uid and phone
-            
-        Raises:
-            ValueError: If token is invalid or missing phone number
-        """
-        decoded_token = verify_firebase_token(firebase_token)
-        
-        firebase_uid = decoded_token.get('uid')
-        phone = decoded_token.get('phone_number')
-        
-        if not phone:
-            raise ValueError("Phone number not found in Firebase token")
-        
-        return {
-            'firebase_uid': firebase_uid,
-            'phone': phone
-        }
-    
-    @staticmethod
-    def create_user(firebase_uid, phone):
-        """
-        Create a new user in MongoDB
-        
-        Args:
-            firebase_uid: Firebase UID
-            phone: Phone number
-            
-        Returns:
-            dict: Created user document
-            
-        Raises:
-            ValueError: If user already exists
-        """
-        users = get_users_collection()
-        
-        # Check if user already exists
-        existing_user = users.find_one({
-            '$or': [
-                {'firebase_uid': firebase_uid},
-                {'phone': phone}
-            ]
-        })
-        
-        if existing_user:
-            raise ValueError("User already exists")
-        
-        # Create new user
-        user_doc = {
-            'firebase_uid': firebase_uid,
-            'phone': phone,
-            'full_name': '',
-            'verification_status': 'UNVERIFIED',
-            'rating': 0.0,
-            'total_buddy_matches': 0,
-            'available_for_ride': False,
-            'created_at': datetime.utcnow(),
-            'updated_at': datetime.utcnow()
-        }
-        
-        result = users.insert_one(user_doc)
-        user_doc['_id'] = result.inserted_id
-        
-        return AuthService._format_user_response(user_doc)
-    
-    @staticmethod
-    def get_user_by_firebase_uid(firebase_uid):
-        """
-        Get user by Firebase UID
-        
-        Args:
-            firebase_uid: Firebase UID
-            
-        Returns:
-            dict: User document or None if not found
-        """
-        users = get_users_collection()
-        user = users.find_one({'firebase_uid': firebase_uid})
-        
-        if user:
-            return AuthService._format_user_response(user)
-        return None
-    
-    @staticmethod
     def _format_user_response(user_doc):
         """Format user document for API response"""
         return {
             'user_id': str(user_doc['_id']),
-            'uid': user_doc.get('uid', user_doc.get('firebase_uid', '')),  # Support both old and new schema
-            'firebase_uid': user_doc.get('firebase_uid', ''),
+            'uid': user_doc.get('uid', ''),
             'phone': user_doc['phone'],
             'verification_status': user_doc['verification_status'],
             'created_at': user_doc['created_at'].isoformat() if isinstance(user_doc['created_at'], datetime) else user_doc['created_at']
@@ -196,23 +116,24 @@ class AuthService:
         normalized_dob = AuthService._normalize_dob(profile_data)
         derived_age = AuthService._calculate_age_from_dob(normalized_dob)
         
+        now = datetime.now(timezone.utc)
         user_doc = {
             'uid': uid,
             'phone': phone,
-            'firebase_uid': None, # explicitly None for phone auth
-            'created_at': datetime.utcnow(),
-            'updated_at': datetime.utcnow(),
+            'firebase_uid': None,
+            'created_at': now,
+            'updated_at': now,
             'role': 'user',
             'rating': 0.0,
             'total_buddy_matches': 0,
             'verification_status': 'UNVERIFIED',
             'rides_completed': 0,
             'reviews_count': 0,
-            'full_name': profile_data.get('full_name', ''),
+            'full_name': _sanitize(profile_data.get('full_name', ''), 80),
             'age': derived_age,
             'dob': normalized_dob,
-            'gender': profile_data.get('gender', ''),
-            'bio': profile_data.get('bio', '')
+            'gender': _sanitize(profile_data.get('gender', ''), 20),
+            'bio': _sanitize(profile_data.get('bio', ''), 150),
         }
         
         result = users.insert_one(user_doc)
