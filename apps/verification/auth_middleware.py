@@ -16,24 +16,28 @@ JWT_SECRET = settings.JWT_SECRET
 JWT_ALGORITHM = 'HS256'
 
 
-def generate_jwt(user_id, phone):
+def generate_jwt(user_id, phone, verification_status: str = ''):
     """
-    Generate JWT token for authenticated user
-    
+    Generate JWT token for authenticated user.
+
     Args:
         user_id: User's MongoDB ObjectId as string
         phone: User's phone number
-        
+        verification_status: Current verification status to embed as 'vs' claim.
+            Embedding the status avoids a DB lookup on every verified_required call.
+            The claim is refreshed whenever the client calls token/refresh.
+
     Returns:
         str: JWT token
     """
     payload = {
         'user_id': str(user_id),
         'phone': phone,
+        'vs': verification_status,  # verification_status shorthand claim
         'exp': datetime.now(timezone.utc) + timedelta(days=7),
         'iat': datetime.now(timezone.utc),
     }
-    
+
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
@@ -103,7 +107,13 @@ def verified_required(view_func):
     """
     Decorator to require both a valid JWT **and** VERIFIED status.
 
-    Returns 403 {"error": "User not verified"} for PENDING / UNVERIFIED users.
+    Fast path: reads the 'vs' (verification_status) claim embedded in the JWT
+    — no DB query needed for tokens issued after this change.
+
+    Fallback path: for older tokens without the 'vs' claim, a single
+    DB lookup is performed (backward-compatible, disappears after 7 days).
+
+    Returns 403 {"error": "User not verified"} for non-VERIFIED users.
 
     Usage:
         @api_view(['GET'])
@@ -135,7 +145,20 @@ def verified_required(view_func):
         request.user_id = payload['user_id']
         request.user_phone = payload['phone']
 
-        # --- Step 2: check verification status in DB ---
+        # --- Step 2: check verification status ---
+        # Fast path: use the 'vs' claim embedded in the JWT (no DB query).
+        vs_claim = payload.get('vs')
+        if vs_claim:
+            if vs_claim != 'VERIFIED':
+                return Response(
+                    {'error': 'User not verified'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            return view_func(request, *args, **kwargs)
+
+        # Fallback path: token pre-dates the 'vs' claim — check DB once.
+        # This branch disappears naturally as tokens rotate within 7 days.
+        logger.debug('[AUTH] No vs claim in token for user %s — falling back to DB check', payload['user_id'])
         from database.mongo import get_users_collection
         from bson import ObjectId
 

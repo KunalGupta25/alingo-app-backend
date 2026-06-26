@@ -124,9 +124,9 @@ def verify_otp_endpoint(request):
                 }
                 user = AuthService.create_user_by_phone(phone, profile_data=profile_data)
             
-            # Generate JWT
+            # Generate JWT with embedded verification_status claim
             from apps.verification.auth_middleware import generate_jwt
-            token = generate_jwt(user['user_id'], phone)
+            token = generate_jwt(user['user_id'], phone, user.get('verification_status', ''))
             user['token'] = token
             
             logger.info('[VERIFY_OTP] Success for phone: %s', phone[-4:])
@@ -182,7 +182,7 @@ def refresh_token(request):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
-        new_token = generate_jwt(payload['user_id'], payload['phone'])
+        new_token = generate_jwt(payload['user_id'], payload['phone'], user.get('verification_status', ''))
         logger.info('[TOKEN_REFRESH] Issued new token for user %s', payload['user_id'])
 
         return Response({

@@ -122,7 +122,7 @@ class VerificationAdmin:
             from django.contrib import messages
             messages.error(request, f'Error approving verification: {str(e)}')
         
-        return HttpResponseRedirect('/verification-panel/')
+        return HttpResponseRedirect('/admin-panel/')
     
     @admin_login_required
     def reject_verification(self, request, verification_id):
@@ -159,7 +159,7 @@ class VerificationAdmin:
             from django.contrib import messages
             messages.error(request, f'Error rejecting verification: {str(e)}')
         
-        return HttpResponseRedirect('/verification-panel/')
+        return HttpResponseRedirect('/admin-panel/')
     
     @admin_login_required
     def otp_logs_view(self, request):
