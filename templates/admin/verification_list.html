@@ -296,8 +296,8 @@
     <div class="container">
         <div class="header">
             <div style="position: absolute; top: 30px; right: 30px; display: flex; gap: 15px;">
-                <a href="/verification-panel/otp-logs/" class="logout-btn" style="position: static;">View OTP Logs</a>
-                <a href="/verification-panel/logout/" class="logout-btn" style="position: static;">Logout</a>
+                <a href="/admin-panel/otp-logs/" class="logout-btn" style="position: static;">View OTP Logs</a>
+                <a href="/admin-panel/logout/" class="logout-btn" style="position: static;">Logout</a>
             </div>
             <h1>{{ title }}</h1>
             <p>Review and approve identity verifications</p>
@@ -348,7 +348,7 @@
                 </div>
 
                 <div class="actions">
-                    <form method="post" action="/verification-panel/{{ v.id_str }}/approve/" style="flex: 1;">
+                    <form method="post" action="/admin-panel/{{ v.id_str }}/approve/" style="flex: 1;">
                         {% csrf_token %}
                         <button type="submit" class="btn btn-approve"
                             onclick="return confirm('Approve this verification?')">
@@ -356,7 +356,7 @@
                         </button>
                     </form>
 
-                    <form method="post" action="/verification-panel/{{ v.id_str }}/reject/" style="flex: 1;">
+                    <form method="post" action="/admin-panel/{{ v.id_str }}/reject/" style="flex: 1;">
                         {% csrf_token %}
                         <input type="hidden" name="reason" value="Document not clear or invalid">
                         <button type="submit" class="btn btn-reject"
