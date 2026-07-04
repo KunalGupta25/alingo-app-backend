@@ -60,11 +60,37 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * R * math.asin(math.sqrt(a))
 
 
+# ── Downsample a polyline to ≤ ~1 point per `min_distance_m` ──
+def downsample_coords(
+    coords: list[tuple[float, float]],
+    min_distance_m: float = 150.0,
+) -> list[tuple[float, float]]:
+    """
+    Keep the first and last points always; drop intermediate points that are
+    closer than `min_distance_m` to the last kept point. Bounds the cost of
+    route_overlap_pct's nested loop to a small, roughly-fixed point count
+    regardless of how detailed the source polyline is (OSRM/Google polylines
+    can have hundreds of points for a multi-km route). Doesn't touch what's
+    stored or shown on the map — only what's used for the overlap comparison.
+    """
+    if len(coords) <= 2:
+        return coords
+
+    kept = [coords[0]]
+    last_lat, last_lng = coords[0]
+    for lat, lng in coords[1:-1]:
+        if haversine_m(last_lat, last_lng, lat, lng) >= min_distance_m:
+            kept.append((lat, lng))
+            last_lat, last_lng = lat, lng
+    kept.append(coords[-1])
+    return kept
+
+
 # ── Route overlap (user_coords vs ride_coords) ────────────
 def route_overlap_pct(
     user_coords: list[tuple[float, float]],
     ride_coords: list[tuple[float, float]],
-    threshold_m: float = 100.0,
+    threshold_m: float = 150.0,
 ) -> float:
     """
     % of user route points that are within `threshold_m` of any ride point.
@@ -73,6 +99,9 @@ def route_overlap_pct(
     if not user_coords or not ride_coords:
         return 100.0   # no polylines → don't reject on overlap
 
+    user_coords = downsample_coords(user_coords)
+    ride_coords = downsample_coords(ride_coords)
+
     matches = 0
     for ulat, ulng in user_coords:
         for rlat, rlng in ride_coords:
@@ -80,6 +109,25 @@ def route_overlap_pct(
                 matches += 1
                 break
     return (matches / len(user_coords)) * 100.0
+
+
+# ── Time window (IST) ─────────────────────────────────────
+def time_diff_minutes(time_a: str, time_b: str) -> int:
+    """
+    Absolute difference in minutes between two 'HH:MM' times, wrapping around
+    midnight (e.g. 23:50 vs 00:10 → 20 min apart, not 1420).
+    Returns a large number if either string is malformed, so the ride gets
+    filtered out rather than accidentally matched.
+    """
+    try:
+        h1, m1 = (int(p) for p in time_a.split(':')[:2])
+        h2, m2 = (int(p) for p in time_b.split(':')[:2])
+    except (ValueError, AttributeError):
+        return 10_000
+    total_a = h1 * 60 + m1
+    total_b = h2 * 60 + m2
+    diff = abs(total_a - total_b)
+    return min(diff, 1440 - diff)
 
 
 class RideService:
@@ -134,10 +182,18 @@ class RideService:
         user_polyline:  str = '',
         min_overlap_pct: float = 50.0,
         gender_filter:  str = 'All',     # Searching filter (All, Male, Female)
+        search_time:    str = None,      # 'HH:MM' — when the searcher wants to travel
+        time_window_minutes: int = 90,   # generous default: Indian trains/buses run late often
     ) -> list[dict]:
         """
-        5-step matching pipeline.
+        6-step matching pipeline (date/geo → exclusions → route overlap →
+        time window → gender → rank).
         Returns a ranked list of ride dicts with enriched creator info.
+
+        `time_window_minutes` defaults to a wide 90 minutes rather than a tight
+        window, since Indian train/bus delays of 30-60+ minutes are routine —
+        a strict window would filter out exactly the matches this app is meant
+        to enable (someone already waiting for a commonly-late train).
         """
         from database.mongo import get_users_collection
 
@@ -150,7 +206,7 @@ class RideService:
         searching_user = users_col.find_one({'_id': user_oid})
         searching_gender = (searching_user or {}).get('gender', 'Unknown')
 
-        # ── STEP 1 + 2  Filter by date & 500m geo radius ──
+        # ── STEP 1 + 2  Filter by date & 2km geo radius ──
         try:
             cursor = rides.find({
                 'status':    'ACTIVE',
@@ -174,57 +230,80 @@ class RideService:
                 'ride_date': ride_date,
             }))
 
-        results = []
+        # ── Pass 1: Filter candidates (Steps 3 & 4), collect survivors ──
+        survivors = []
         for ride in candidates:
 
             # ── STEP 3 — Exclusions ──────────────────────
-            # Skip own ride
             if ride['creator_id'] == user_oid:
                 continue
 
-            participants    = ride.get('participants', [])
-            approved_count  = sum(1 for p in participants if p.get('status') == 'APPROVED')
-            max_seats       = ride.get('max_seats', 1)
+            participants   = ride.get('participants', [])
+            approved_count = sum(1 for p in participants if p.get('status') == 'APPROVED')
+            max_seats      = ride.get('max_seats', 1)
 
-            # Skip full rides
             if approved_count >= max_seats:
                 continue
 
-            # Skip if already a participant
-            already_in = any(
-                p.get('user_id') == user_oid for p in participants
-            )
+            already_in = any(p.get('user_id') == user_oid for p in participants)
             if already_in:
                 continue
 
             # ── STEP 4 — Route overlap ───────────────────
             ride_coords = decode_polyline(ride.get('route_polyline', ''))
-            overlap     = route_overlap_pct(user_coords, ride_coords)
-            if overlap < min_overlap_pct:
+            if route_overlap_pct(user_coords, ride_coords) < min_overlap_pct:
                 continue
 
-            # ── STEP 5 — Distance from $nearSphere ───────
-            # MongoDB $nearSphere returns docs sorted by distance already.
-            # Approximate distance using haversine of start_locations.
+            # ── STEP 4.5 — Time window ───────────────────
+            # Only filter on time if the searcher gave a target time; otherwise
+            # (e.g. browsing rides for the day generally) skip this check.
+            ride_time_diff = 0
+            if search_time:
+                ride_time_diff = time_diff_minutes(search_time, ride.get('ride_time', ''))
+                if ride_time_diff > time_window_minutes:
+                    continue
+
+            # Approximate distance using haversine of start_locations
             ride_loc = ride['start_location']['coordinates']  # [lng, lat]
             dist_m   = haversine_m(
                 user_location[1], user_location[0],
                 ride_loc[1],      ride_loc[0],
             )
 
-            # ── Enrich with creator info ─────────────────
-            creator = users_col.find_one({'_id': ride['creator_id']})
-            creator_name   = (creator or {}).get('full_name') or (creator or {}).get('phone', 'Unknown')
-            creator_rating = (creator or {}).get('rating', 0.0)
-            creator_gender = (creator or {}).get('gender', 'Unknown')
+            survivors.append({
+                'ride':            ride,
+                'approved_count':  approved_count,
+                'max_seats':       max_seats,
+                'dist_m':          dist_m,
+                'time_diff':       ride_time_diff,
+            })
 
-            # ── Check Gender Compatibilities ─────────────
+        # ── Batch-fetch all creator docs in ONE query ────
+        creator_oids = list({s['ride']['creator_id'] for s in survivors})
+        creator_docs = users_col.find({'_id': {'$in': creator_oids}})
+        creator_map  = {doc['_id']: doc for doc in creator_docs}
+
+        # ── Pass 2: Gender check (Step 5) + build result list ──
+        results = []
+        for s in survivors:
+            ride           = s['ride']
+            approved_count = s['approved_count']
+            max_seats      = s['max_seats']
+            dist_m         = s['dist_m']
+            time_diff      = s['time_diff']
+
+            creator        = creator_map.get(ride['creator_id'], {})
+            creator_name   = creator.get('full_name') or creator.get('phone', 'Unknown')
+            creator_rating = creator.get('rating', 0.0)
+            creator_gender = creator.get('gender', 'Unknown')
+
+            # ── STEP 5 — Gender compatibility ────────────
             ride_pref = ride.get('gender_preference', 'Any')
-            
+
             # 1. Does the CREATOR mandate a specific gender?
             if ride_pref != 'Any' and ride_pref != searching_gender:
                 continue
-                
+
             # 2. Does the SEARCHER mandate a specific gender?
             if gender_filter != 'All' and gender_filter != creator_gender:
                 continue
@@ -236,16 +315,19 @@ class RideService:
                 'creator_rating':   round(float(creator_rating), 1),
                 'creator_gender':   creator_gender,
                 'distance_meters':  round(dist_m),
+                'time_diff_minutes': time_diff,
                 'available_seats':  max_seats - approved_count,
                 'ride_time':        ride.get('ride_time', ''),
                 'destination_name': ride.get('destination', {}).get('name', ''),
                 '_sort_rating':     float(creator_rating),
             })
 
-        # ── Rank: distance ASC  →  rating DESC ──────────
-        results.sort(key=lambda r: (r['distance_meters'], -r['_sort_rating']))
+        # ── Rank: time closeness ASC → distance ASC → rating DESC ──
+        # Time compatibility comes first: two people can only share a ride if
+        # they're leaving around the same time. Distance and rating are only
+        # tiebreakers among rides that are already time-feasible.
+        results.sort(key=lambda r: (r['time_diff_minutes'], r['distance_meters'], -r['_sort_rating']))
 
-        # Remove internal sort key before returning
         for r in results:
             r.pop('_sort_rating', None)
 

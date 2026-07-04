@@ -3,9 +3,12 @@ Push Notification Utility — Expo Push Notifications
 Sends notifications via Expo's push service (https://exp.host/--/api/v2/push/send).
 No FCM/APNs configuration required for Expo Go / dev builds.
 """
+import logging
 import requests
 from bson import ObjectId
 from database.mongo import get_users_collection
+
+logger = logging.getLogger(__name__)
 
 EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send'
 
@@ -42,9 +45,9 @@ def send_push_notification(user_id, title: str, body: str, data: dict = None):
             },
             timeout=10,
         )
-        print(f'[PUSH] Sent to {user_id}: {resp.status_code}')
+        logger.info('[PUSH] Sent to %s: %s', user_id, resp.status_code)
     except Exception as e:
-        print(f'[PUSH ERROR] {e}')
+        logger.exception('[PUSH ERROR] %s', e)
 
 
 def send_bulk_notifications(user_ids, title: str, body: str, data: dict = None):
@@ -85,6 +88,6 @@ def send_bulk_notifications(user_ids, title: str, body: str, data: dict = None):
             },
             timeout=15,
         )
-        print(f'[PUSH BULK] Sent {len(messages)} notifications: {resp.status_code}')
+        logger.info('[PUSH BULK] Sent %d notifications: %s', len(messages), resp.status_code)
     except Exception as e:
-        print(f'[PUSH BULK ERROR] {e}')
+        logger.exception('[PUSH BULK ERROR] %s', e)

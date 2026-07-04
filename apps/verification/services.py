@@ -3,7 +3,7 @@ Verification Service - Handles identity verification logic
 """
 from database.mongo import MongoDB
 from bson import ObjectId
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class VerificationService:
@@ -37,8 +37,8 @@ class VerificationService:
             'reviewed_by': None,
             'reviewed_at': None,
             'rejection_reason': None,
-            'submitted_at': datetime.utcnow(),
-            'updated_at': datetime.utcnow()
+            'submitted_at': datetime.now(timezone.utc),
+            'updated_at': datetime.now(timezone.utc)
         }
         
         collection = VerificationService.get_collection()
@@ -108,8 +108,8 @@ class VerificationService:
             {'$set': {
                 'status': 'APPROVED',
                 'reviewed_by': admin_user_id,
-                'reviewed_at': datetime.utcnow(),
-                'updated_at': datetime.utcnow()
+                'reviewed_at': datetime.now(timezone.utc),
+                'updated_at': datetime.now(timezone.utc)
             }}
         )
         
@@ -137,9 +137,9 @@ class VerificationService:
             {'$set': {
                 'status': 'REJECTED',
                 'reviewed_by': admin_user_id,
-                'reviewed_at': datetime.utcnow(),
+                'reviewed_at': datetime.now(timezone.utc),
                 'rejection_reason': reason,
-                'updated_at': datetime.utcnow()
+                'updated_at': datetime.now(timezone.utc)
             }}
         )
         

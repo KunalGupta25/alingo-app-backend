@@ -131,7 +131,11 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # Internationalization
 LANGUAGE_CODE = 'en-us'
-TIME_ZONE = 'UTC'
+# All users are in India — comparisons like "is this ride today" and time-window
+# matching need to line up with IST, not the server's UTC clock (Render runs UTC).
+# USE_TZ stays True so everything is still stored in UTC internally; this setting
+# only affects timezone.localtime() conversions used for date/time comparisons.
+TIME_ZONE = 'Asia/Kolkata'
 USE_I18N = True
 USE_TZ = True
 
@@ -169,6 +173,7 @@ if USE_GCS:
 
 # Verification Upload Settings
 VERIFICATION_UPLOAD_DIR = 'verifications'
+PROFILE_PHOTO_UPLOAD_DIR = 'profile_photos'
 MAX_UPLOAD_SIZE = 5 * 1024 * 1024  # 5MB
 ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/jpg']
 
@@ -208,11 +213,10 @@ if not DEBUG:
     SECURE_CONTENT_TYPE_NOSNIFF = True
     SECURE_BROWSER_XSS_FILTER = True
 
-# CSRF trusted origins — extend via env var for multi-domain setups
-_extra_csrf = os.getenv('CSRF_TRUSTED_ORIGINS', '')
-CSRF_TRUSTED_ORIGINS = [
-    'https://alingo-app-backend-production.up.railway.app',
-] + [o.strip() for o in _extra_csrf.split(',') if o.strip()]
+# CSRF trusted origins — set via env var (comma-separated)
+# Example: https://your-app.onrender.com,https://your-app.up.railway.app
+_csrf_origins = os.getenv('CSRF_TRUSTED_ORIGINS', '')
+CSRF_TRUSTED_ORIGINS = [o.strip() for o in _csrf_origins.split(',') if o.strip()]
 
 # Session timeout — 7 days (matches JWT expiry)
 SESSION_COOKIE_AGE = 7 * 24 * 60 * 60

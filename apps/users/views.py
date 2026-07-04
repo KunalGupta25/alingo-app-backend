@@ -81,9 +81,19 @@ def get_me(request):
 @api_view(['PATCH'])
 @verified_required
 def update_profile(request):
-    """PATCH /users/profile — update bio and availability."""
+    """PATCH /users/profile — update full_name, bio, and availability."""
     try:
         updates = {}
+
+        full_name = request.data.get('full_name')
+        if full_name is not None:
+            full_name = _sanitize(str(full_name), 100)
+            if not full_name:
+                return Response(
+                    {'error': 'full_name cannot be empty.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            updates['full_name'] = full_name
 
         bio = request.data.get('bio')
         if bio is not None:

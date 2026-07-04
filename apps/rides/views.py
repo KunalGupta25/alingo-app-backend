@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from datetime import date, datetime, timezone
 from bson import ObjectId
+from django.utils import timezone as dj_timezone
 
 from apps.verification.auth_middleware import verified_required
 from database.mongo import get_users_collection, get_rides_collection
@@ -27,6 +28,16 @@ def _batch_fetch_users(user_ids: list) -> dict:
         {'full_name': 1, 'phone': 1},
     )
     return {doc['_id']: doc for doc in docs}
+
+
+def _ist_today() -> date:
+    """
+    'Today' in IST, not the server's local/UTC clock. Render runs UTC, but all
+    users are in India — without this, "ride date cannot be in the past"
+    checks would drift against what users actually experience as today.
+    Requires settings.TIME_ZONE = 'Asia/Kolkata'.
+    """
+    return dj_timezone.localtime(dj_timezone.now()).date()
 
 
 def _sanitize_str(value: str, max_len: int = 200) -> str:
@@ -108,7 +119,7 @@ def create_ride(request):
         except ValueError:
             return Response({'error': 'ride_date must be YYYY-MM-DD.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if ride_date < date.today():
+        if ride_date < _ist_today():
             return Response({'error': 'Ride date cannot be in the past.'}, status=status.HTTP_400_BAD_REQUEST)
 
         ride = RideService.create_ride(
@@ -168,14 +179,24 @@ def search_rides(request):
         except ValueError:
             return Response({'error': 'ride_date must be YYYY-MM-DD.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if ride_date < date.today():
+        if ride_date < _ist_today():
             return Response({'error': 'ride_date cannot be in the past.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        search_time = request.data.get('ride_time')  # optional 'HH:MM' — when the searcher wants to travel
+        time_window_minutes = request.data.get('time_window_minutes', 90)
+        try:
+            time_window_minutes = int(time_window_minutes)
+        except (ValueError, TypeError):
+            time_window_minutes = 90
 
         matches = RideService.search_rides(
             user_id=user_id,
             user_location=[float(user_location[0]), float(user_location[1])],
             ride_date=ride_date_str,
             user_polyline=route_polyline,
+            gender_filter=gender_filter,
+            search_time=search_time,
+            time_window_minutes=time_window_minutes,
         )
 
         return Response(matches, status=status.HTTP_200_OK)
